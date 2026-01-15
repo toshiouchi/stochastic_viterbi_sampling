@@ -215,6 +215,7 @@ class StochasticViterbiSamples(nn.Module):
 ```python
 test2 = StochasticViterbiSamples( 30000 )
 
+emissions = torch.randn( ( 8, 97, 30000 ) )
 beam_probs, sampled_beam_idx, finalized_tokens = test2._compute_grpo_samples( emissions )
 
 print( beam_probs.size() )
