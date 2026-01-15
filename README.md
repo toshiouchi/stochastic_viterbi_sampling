@@ -9,6 +9,10 @@ As for the reinforcement learning, I haven't yet completed the training that I c
 The function input emissions assumes that bert's last_hidden_state is set to ( bsz, seq_len, vocab_size ) using nn.LayerNorm and nn.Linear .
 
 ```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 class StochasticViterbiSample(nn.Module):
     def __init__(self, num_embedding, low_rank=32, beam_size=256, temp = 1.0):
         super().__init__()
@@ -95,10 +99,21 @@ class StochasticViterbiSample(nn.Module):
         return beam_probs, sampled_beam_idx.unsqueeze(-1), finalized_tokens
 ```
 ```python
-eps = 1e-8
-tmp = torch.clamp( beam_probs, eps )
-beam_log_probs = torch.log( tmp )
-sample_log_probs = torch.gather( beam_log_probs, -1, sampled_beam_idx ).squeeze( -1 )
+
+test = StochasticViterbiSample( 30000 )
+
+emissions = torch.randn( ( 8, 97, 30000 ) )
+
+beam_probs, sampled_beam_idx, finalized_tokens = test._compute_stochastic_viterbi_sample( emissions )
+
+print( beam_probs.size() )
+print( sampled_beam_idx.size() )
+print( finalized_tokens.size() )
+```
+```
+torch.Size([8, 97, 256])
+torch.Size([8, 97, 1])
+torch.Size([8, 97])
 ```
 
 # Code to generate multiple samples
@@ -106,6 +121,10 @@ sample_log_probs = torch.gather( beam_log_probs, -1, sampled_beam_idx ).squeeze(
 Since multiple samplings are required for the baseline calculation of GRPO, I came up with this code.
 
 ```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 class StochasticViterbiSamples(nn.Module):
     def __init__(self, num_embedding, low_rank=32, beam_size=256, temp = 1.0, num_samples = 8 ):
         super().__init__()
@@ -193,5 +212,18 @@ class StochasticViterbiSamples(nn.Module):
         
         return beam_probs, sampled_beam_idx, finalized_tokens
 ```
+```python
+test2 = StochasticViterbiSamples( 30000 )
 
+beam_probs, sampled_beam_idx, finalized_tokens = test2._compute_grpo_samples( emissions )
+
+print( beam_probs.size() )
+print( sampled_beam_idx.size() )
+print( finalized_tokens.size() )
+```
+```
+torch.Size([8, 97, 256, 8])
+torch.Size([8, 97, 8])
+torch.Size([8, 97, 8])
+```
 I hope this helps. Thank you.
