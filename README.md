@@ -45,7 +45,6 @@ class StochasticViterbiSample(nn.Module):
         traj_tokens, traj_scores = [], []
         finalized_tokens, finalized_scores = [], []
 
-        # compute the normalizer in the log-space
         score = beam_emission_scores[:, 0]  # B x K
         
         for i in range(1, seq_len):
@@ -158,7 +157,6 @@ class StochasticViterbiSamples(nn.Module):
         traj_tokens, traj_scores = [], []
         finalized_tokens, finalized_scores = [], []
 
-        # compute the normalizer in the log-space
         score = beam_emission_scores[:, 0, :,  None].expand( -1, -1, self.num_samples )  # B x K, N
         
         for i in range(1, seq_len):
@@ -173,7 +171,7 @@ class StochasticViterbiSamples(nn.Module):
             N = self.num_samples
             flat_score = _score.permute(0, 2, 3, 1).reshape(-1, C) # b * W * N, C
             probs = F.softmax(flat_score / self.temp, dim=-1)
-            _index_flat = torch.multinomial(probs, num_samples=1)
+            _index_flat = torch.multinomial(probs, num_samples=1, replacement=True)
             _score_flat = torch.gather(flat_score, -1, _index_flat)
             _index = _index_flat.view(B, W, N)
             _score = _score_flat.view(B, W, N)
