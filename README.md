@@ -127,7 +127,7 @@ torch.Size([8, 97])
 
 # Code to generate multiple samples
 
-Since multiple samplings are required for the baseline calculation of GRPO, I came up with this code.
+Since multiple samplings are required for the baseline calculation of GRPO, I came up with this code. A number of samples is 8.
 
 ```python
 import torch
