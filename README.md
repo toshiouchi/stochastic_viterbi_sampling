@@ -85,7 +85,7 @@ class StochasticViterbiSample(nn.Module):
         all_scores = traj_scores
         all_scores.append( score )
         all_scores = torch.stack( all_scores, dim = 0 ).transpose( 0, 1 ).to(device)
-        beam_probs = F.softmax( all_scores / self.temp, dim = 2 )
+        beam_probs = F.softmax( all_scores, dim = 2 )
 
         # now running the back-tracing and find the best
         best_score, best_index = score.max(dim=1)
@@ -198,7 +198,7 @@ class StochasticViterbiSamples(nn.Module):
         all_scores = traj_scores
         all_scores.append( score )
         all_scores = torch.stack( all_scores, dim = 0 ).transpose( 0, 1 ).to(device) #bsz, seq_len, beam, N
-        beam_probs = F.softmax( all_scores / self.temp, dim = 2 ) #bsz, seq_len, beam, N
+        beam_probs = F.softmax( all_scores, dim = 2 ) #bsz, seq_len, beam, N
         
         # now running the back-tracing and find the best
         best_score, best_index = score.max(dim=1) # max( bsz, beam ), bsz, N
