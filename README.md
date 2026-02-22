@@ -125,3 +125,127 @@ torch.Size([8, 97, 1])
 torch.Size([8, 97])
 ```
 
+
+# Generate multi samples fo GRPO。
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class StochasticViterbiSamples(nn.Module):
+    def __init__(self, num_embedding, low_rank=32, beam_size=256, temp = 1.0, num_samples = 8 ):
+        super().__init__()
+
+        self.E1 = nn.Embedding(num_embedding, low_rank)
+        self.E2 = nn.Embedding(num_embedding, low_rank)
+
+        self.rank = low_rank
+        self.beam = beam_size
+        self.temp = temp
+        self.num_samples = num_samples
+
+    def _compute_grpo_samples(self, emissions, beam=None):
+
+        eps = 1e-8
+        device = emissions.device
+        
+        beam = beam if beam is not None else self.beam
+        
+        beam_emission_scores, beam_targets = torch.topk( emissions, beam, 2)        
+        
+        batch_size, seq_len = beam_emission_scores.size()[:2]
+
+        beam_transition_score1 = self.E1(beam_targets[:, :-1])  # B x (T-1) x K x D
+        beam_transition_score2 = self.E2(beam_targets[:, 1:])   # B x (T-1) x K x D
+        beam_transition_matrix = torch.bmm(
+            beam_transition_score1.view(-1, beam, self.rank),
+            beam_transition_score2.view(-1, beam, self.rank).transpose(1, 2))
+        beam_transition_matrix = beam_transition_matrix.view(batch_size, -1, beam, beam) # bsz, seq_len, beam, beam
+
+        traj_tokens, traj_scores = [], []
+        finalized_tokens, finalized_scores = [], []
+        traj_scores2 = []
+        traj_tokens2 = []
+
+        # compute the normalizer in the log-space
+        score = beam_emission_scores[:, 0]  # B x K
+        _score2 = beam_emission_scores[:,0][:,None,:].expand( -1, self.num_samples, -1 ) #B * self.num_samples * K
+
+        for i in range(1, seq_len):
+            traj_scores.append(score) # bsz * beam
+            traj_scores2.append( _score2 )
+            _score2 = _score2[:,:,:,None] + beam_transition_matrix[:, i-1,None,:,:].expand( -1, self.num_samples,-1,-1) 
+                    # bsz, self.num_samples, bema, beam
+
+            # greedy selection
+            #_score, _index = _score.max(dim=1) # bsz, beam     bsz, beam 
+
+            ## multinomial selection
+            B, N, C, W = _score2.shape
+            flat_score = _score2.permute(0, 3, 1, 2).reshape(-1, C)
+            #flat_score = torch.clamp( flat_score, min = -100, max = 100 )
+            probs = F.softmax(flat_score / self.temp, dim=-1)
+            _index_flat = torch.multinomial(probs, num_samples=1, replacement = True )  
+
+            _score_flat = torch.gather(flat_score, -1, _index_flat)
+            _index2 = _index_flat.view(B, W, self.num_samples).transpose(1,2)
+            _score2 = _score_flat.view(B, W, self.num_samples).transpose(1,2)
+
+            _score2 = _score2 + beam_emission_scores[:, i][:,None,:].expand(-1,self.num_samples,-1) # bsz, self.num_samples, beam   
+
+            #if masks is not None:
+            #    score = torch.where(masks[:, i: i+1], _score, score)
+            #    index = torch.where(masks[:, i: i+1], _index, dummy)
+            #else:
+            score, index = _score2[:,0,:], _index2[:,0,:]
+            traj_tokens.append(index)
+            traj_tokens2.append( _index2 )
+
+
+        all_scores = traj_scores2
+        all_scores.append( _score2 )
+        all_scores = torch.stack( all_scores, dim = 0 ).transpose( 0, 1 ).to(device) #bsz, seq_len, beam, N
+        beam_probs = F.softmax( all_scores.transpose( 2, 3 ), dim = 2 ) #bsz, seq_len, beam, N
+        #beam_probs = F.softmax( all_scores.permute( 3, 0, 1, 2 ), dim = 3 ) #N, bsz, seq_len, beam
+
+        # now running the back-tracing and find the best
+        best_score, best_index = _score2.max(dim=2) # max( bsz, beam ), bsz, N
+        finalized_tokens.append(best_index[:, None, :]) #bsz,1, N
+        finalized_scores.append(best_score[:, None, :]) #bsz,1, N
+
+        for idx, scs in zip(reversed(traj_tokens2), reversed(traj_scores2)): # each of seq_len -1, bsz, beam, N 
+            previous_index = finalized_tokens[-1]
+            finalized_tokens.append(idx.gather(2, previous_index))
+            finalized_scores.append(scs.gather(2, previous_index))
+
+        finalized_tokens.reverse() # seq_len, bsz, N
+        sampled_beam_idx = torch.cat(finalized_tokens, 1) # seq_len, bsz, N
+        finalized_tokens = beam_targets.gather(2, sampled_beam_idx)
+
+        finalized_scores.reverse()
+        finalized_scores = torch.cat(finalized_scores, 1)
+        finalized_scores[:, 1:] = finalized_scores[:, 1:] - finalized_scores[:, :-1]
+
+        #return beam_probs, sampled_beam_idx, finalized_tokens, finalized_scores 
+        return beam_probs, sampled_beam_idx, finalized_tokens 
+```
+num_samples = 8.
+
+```python
+
+test = StochasticViterbiSamples( 30000, num_samples = 8 )
+
+emissions = torch.randn( ( 8, 97, 30000 ) )
+
+beam_probs, sampled_beam_idx, finalized_tokens = test._compute_grpo_samples( emissions )
+
+print( beam_probs.size() )
+print( sampled_beam_idx.size() )
+```
+
+```
+torch.Size([8, 97, 256, 8])
+torch.Size([8, 97, 8])
+torch.Size([8, 97, 8])
+```
