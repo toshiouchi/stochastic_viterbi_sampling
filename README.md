@@ -126,7 +126,7 @@ torch.Size([8, 97])
 ```
 
 
-# Generate multi samples fo GRPO。
+# Generate multi samples for GRPO。
 
 ```python
 import torch
