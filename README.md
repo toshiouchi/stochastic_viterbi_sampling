@@ -134,7 +134,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class StochasticViterbiSamples(nn.Module):
-    def __init__(self, num_embedding, low_rank=32, beam_size=256, temp = 1.0, num_samples = 8 ):
+    def __init__(self, num_embedding, low_rank=32, beam_size=256, temp = 1.0, 
+                 top_p = 0.9, top_k = 50, num_samples = 8 ):
         super().__init__()
 
         self.E1 = nn.Embedding(num_embedding, low_rank)
@@ -143,6 +144,8 @@ class StochasticViterbiSamples(nn.Module):
         self.rank = low_rank
         self.beam = beam_size
         self.temp = temp
+        self.top_p = top_p
+        self.top_k = top_k
         self.num_samples = num_samples
 
     def _compute_grpo_samples(self, emissions, beam=None):
@@ -163,78 +166,152 @@ class StochasticViterbiSamples(nn.Module):
             beam_transition_score2.view(-1, beam, self.rank).transpose(1, 2))
         beam_transition_matrix = beam_transition_matrix.view(batch_size, -1, beam, beam) # bsz, seq_len, beam, beam
 
+        # フィルタリング用のパラメータ設定 (config等から取得できるよう適宜調整してください)
+        #top_k = 50  # 上位k個に絞る (0なら無効)
+        #top_p = 0.9 # 累積確率pまでに絞る (1.0なら無効)
+
         traj_tokens, traj_scores = [], []
-        finalized_tokens, finalized_scores = [], []
         traj_scores2 = []
         traj_tokens2 = []
 
-        # compute the normalizer in the log-space
-        score = beam_emission_scores[:, 0]  # B x K
-        _score2 = beam_emission_scores[:,0][:,None,:].expand( -1, self.num_samples, -1 ) #B * self.num_samples * K
+        score = beam_emission_scores[:, 0]
+        _score2 = beam_emission_scores[:,0][:,None,:].expand( -1, self.num_samples, -1 ).clone()
+        # --- 多様性を強制するためのノイズ追加 ---
+        # 各グループが異なる探索を始めるように、微小なノイズを加える
+        # (1e-5 程度のノイズで十分です。順位が入れ替わるきっかけを作ります)
+        noise = torch.randn_like(_score2) * 1e-5
+        _score2 = _score2 + noise
 
         for i in range(1, seq_len):
-            traj_scores.append(score) # bsz * beam
+            traj_scores.append(score)
             traj_scores2.append( _score2 )
             _score2 = _score2[:,:,:,None] + beam_transition_matrix[:, i-1,None,:,:].expand( -1, self.num_samples,-1,-1) 
-                    # bsz, self.num_samples, bema, beam
 
-            # greedy selection
-            #_score, _index = _score.max(dim=1) # bsz, beam     bsz, beam 
-
-            ## multinomial selection
             B, N, C, W = _score2.shape
             flat_score = _score2.permute(0, 3, 1, 2).reshape(-1, C)
-            #flat_score = torch.clamp( flat_score, min = -100, max = 100 )
-            probs = F.softmax(flat_score / self.temp, dim=-1)
-            _index_flat = torch.multinomial(probs, num_samples=1, replacement = True )  
+            
+
+            # --- Top-K / Top-P Filtering 開始 (修正版) ---
+            logits = flat_score / self.temp
+            
+            # 1. まず Top-K で上位50個に絞る
+            # ※ここで全語彙に対する Top-K を行い、小さなテンソルに切り出します
+            top_k_val = 50 
+            top_k_logits, top_k_indices = torch.topk(logits, top_k_val, dim=-1)
+
+            # 2. Top-P (Nucleus) filtering
+            if self.top_p < 1.0:
+                # Top-Kで絞った「50個」の中でソート
+                sorted_logits, sorted_indices = torch.sort(top_k_logits, descending=True)
+                
+                # 累積確率を計算
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+
+                # 除去対象のマスクを作成
+                sorted_indices_to_remove = cumulative_probs > self.top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+
+                # 【重要】top_k_logits と同じ形状 (サイズ50) のマスクを作成する
+                # ここを zeros_like(logits) ではなく zeros_like(top_k_logits) に修正
+                indices_to_remove_k = torch.zeros_like(top_k_logits, dtype=torch.bool).scatter_(
+                    dim=-1, 
+                    index=sorted_indices, 
+                    src=sorted_indices_to_remove
+                )
+
+                # サイズ50のテンソルに対してマスクを適用
+                top_k_logits[indices_to_remove_k] = -float('Inf')
+
+            # 3. 全語彙の logits を一旦すべて -inf にして、生き残った top_k_logits だけを戻す
+            new_logits = torch.full_like(logits, float('-inf'))
+            new_logits.scatter_(dim=-1, index=top_k_indices, src=top_k_logits)
+
+            logits = new_logits
+            # --- Top-K / Top-P Filtering 終了 ---
+
+            probs = F.softmax(logits, dim=-1)
+            
+            # 安全策: 全てが -Inf になった場合の回避
+            if torch.isnan(probs).any():
+                probs = torch.ones_like(probs) / probs.size(-1)
+
+             _index_flat = torch.multinomial(probs, num_samples=1, replacement=True)  
 
             _score_flat = torch.gather(flat_score, -1, _index_flat)
             _index2 = _index_flat.view(B, W, self.num_samples).transpose(1,2)
             _score2 = _score_flat.view(B, W, self.num_samples).transpose(1,2)
 
-            _score2 = _score2 + beam_emission_scores[:, i][:,None,:].expand(-1,self.num_samples,-1) # bsz, self.num_samples, beam   
+            _score2 = _score2 + beam_emission_scores[:, i][:,None,:].expand(-1,self.num_samples,-1)
 
-            #if masks is not None:
-            #    score = torch.where(masks[:, i: i+1], _score, score)
-            #    index = torch.where(masks[:, i: i+1], _index, dummy)
-            #else:
             score, index = _score2[:,0,:], _index2[:,0,:]
             traj_tokens.append(index)
             traj_tokens2.append( _index2 )
 
-
+        # --- 以下、元のバックトレーシング処理 ---
         all_scores = traj_scores2
         all_scores.append( _score2 )
-        all_scores = torch.stack( all_scores, dim = 0 ).transpose( 0, 1 ).to(device) #bsz, seq_len, beam, N
-        beam_probs = F.softmax( all_scores.transpose( 2, 3 ), dim = 2 ) #bsz, seq_len, beam, N
-        #beam_probs = F.softmax( all_scores.permute( 3, 0, 1, 2 ), dim = 3 ) #N, bsz, seq_len, beam
+        all_scores = torch.stack( all_scores, dim = 0 ).transpose( 0, 1 ).to(device)
+        beam_probs = F.softmax( all_scores.transpose( 2, 3 ), dim = 2 )
 
-        # now running the back-tracing and find the best
-        best_score, best_index = _score2.max(dim=2) # max( bsz, beam ), bsz, N
-        finalized_tokens.append(best_index[:, None, :]) #bsz,1, N
-        finalized_scores.append(best_score[:, None, :]) #bsz,1, N
+ 
+        # --- 修正後 ---
+        # 最後のステップでサンプリングされたインデックスをそのまま使う
+        # _index2 は (Batch, Group, Beam) の形状のはずです        
+        # 最後のステップでサンプリングされたインデックスをそのまま使う
+        # last_sampled_index (B, N, W) と想定
+        last_sampled_index = _index2 
+        
+        # 1. finalized_tokens への追加 (B, 1, N, W にならないよう注意)
+        # もし _score2 が (B, N, W) なら、index も (B, N, 1) などにする必要があります
+        # ここでは gather 用に最後の次元を 1 にした index を作ります
+        
+        # last_sampled_index が (Batch, Group, Beam) の場合、
+        # 通常バックトレーシングで必要なのは「どのビームを選んだか」というインデックスです
+        # ここでは _score2 の最後の次元(2)に対して gather します
 
-        for idx, scs in zip(reversed(traj_tokens2), reversed(traj_scores2)): # each of seq_len -1, bsz, beam, N 
-            previous_index = finalized_tokens[-1]
-            finalized_tokens.append(idx.gather(2, previous_index))
-            finalized_scores.append(scs.gather(2, previous_index))
+        # --- 修正：バックトレーシングの開始 ---
+        # 1. まずリストを空にする（重要！）
+        finalized_tokens = []
+        finalized_scores = []
 
-        finalized_tokens.reverse() # seq_len, bsz, N
-        sampled_beam_idx = torch.cat(finalized_tokens, 1) # seq_len, bsz, N
-        finalized_tokens = beam_targets.gather(2, sampled_beam_idx)
+        # 2. サンプリングされた最後のインデックスを取得 (B, N, 1)
+        # _index2 が (B, W, self.num_samples) の場合、適切にリシェイプ
+        # ※ W=1, self.num_samples=16 のケースが多いです
+        current_sampled_index = _index2[:, :, 0:1] # (B, W, 1) 
 
-        finalized_scores.reverse()
-        finalized_scores = torch.cat(finalized_scores, 1)
-        finalized_scores[:, 1:] = finalized_scores[:, 1:] - finalized_scores[:, :-1]
+        # 3. 最初の要素として追加
+        finalized_tokens.append(current_sampled_index) # (B, W, 1)
+        finalized_scores.append(_score2.gather(2, current_sampled_index)) # (B, W, 1)
 
-        #return beam_probs, sampled_beam_idx, finalized_tokens, finalized_scores 
-        return beam_probs, sampled_beam_idx, finalized_tokens 
+        # 4. 過去に遡ってパスを復元
+        # traj_tokens2 はループ内で append された各ステップのサンプリング結果
+        for idx_step, scs_step in zip(reversed(traj_tokens2), reversed(traj_scores2)):
+            # 直前のステップで選ばれたインデックスを使って、その前のインデックスを引く
+            previous_pointer = finalized_tokens[-1]
+            finalized_tokens.append(idx_step.gather(2, previous_pointer))
+            finalized_scores.append(scs_step.gather(2, previous_pointer))
+
+        # 5. 逆順にして結合 (この時点では [seq_len, B, Group, 1] のリスト)
+        finalized_tokens.reverse()
+
+        sampled_beam_idx = torch.cat(finalized_tokens, 2) # [B, G, S]
+
+        # 2. beam_targets [B, S, Beam] と合わせるために transpose
+        # [B, G, S] -> [B, S, G] にして、各ステップ(S)ごとのビーム(G)を選択
+        sampled_beam_idx = sampled_beam_idx.permute(0, 2, 1) # [B, S, G]
+
+        # 3. gather 実行 (第2次元[Beam方向]から、サンプリングしたインデックスを抽出)
+        finalized_tokens = beam_targets.gather(2, sampled_beam_idx) # [B, S, G]
+ 
+        return beam_probs, sampled_beam_idx, finalized_tokens
+ 
+
 ```
-num_samples = 8.
+num_samples = 16.
 
 ```python
-
-test = StochasticViterbiSamples( 30000, num_samples = 8 )
+test = StochasticViterbiSamples( 30000, num_samples = 16 )
 
 emissions = torch.randn( ( 8, 97, 30000 ) )
 
@@ -242,10 +319,12 @@ beam_probs, sampled_beam_idx, finalized_tokens = test._compute_grpo_samples( emi
 
 print( beam_probs.size() )
 print( sampled_beam_idx.size() )
+print( finalized_tokens.size() )
+
 ```
 
 ```
-torch.Size([8, 97, 256, 8])
-torch.Size([8, 97, 8])
-torch.Size([8, 97, 8])
+torch.Size([8, 97, 256, 16])
+torch.Size([8, 97, 16])
+torch.Size([8, 97, 16])
 ```
