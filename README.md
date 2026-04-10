@@ -108,10 +108,13 @@ class StochasticViterbiSample(nn.Module):
         return beam_probs, sampled_beam_idx.unsqueeze(-1), finalized_tokens
 ```
 ```python
+vocab_size = 30000
+bsz = 8
+seq_len = 97
 
-test = StochasticViterbiSample( 30000 )
+test = StochasticViterbiSample( vocab_size )
 
-emissions = torch.randn( ( 8, 97, 30000 ) )
+emissions = torch.randn( ( bsz, seq_len, vocab_size ) )
 
 beam_probs, sampled_beam_idx, finalized_tokens = test._compute_stochastic_viterbi_sample( emissions )
 
@@ -311,9 +314,13 @@ class StochasticViterbiSamples(nn.Module):
 num_samples = 16.
 
 ```python
-test = StochasticViterbiSamples( 30000, num_samples = 16 )
+vocab_size = 30000
+bsz = 8
+seq_len = 97
 
-emissions = torch.randn( ( 8, 97, 30000 ) )
+test = StochasticViterbiSamples( vocab_size, num_samples = 16 )
+
+emissions = torch.randn( ( bsz, seq_len, vocab_size ) )
 
 beam_probs, sampled_beam_idx, finalized_tokens = test._compute_grpo_samples( emissions )
 
