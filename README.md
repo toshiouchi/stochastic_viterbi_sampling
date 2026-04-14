@@ -297,14 +297,14 @@ class StochasticViterbiSamples(nn.Module):
 
         # now running the back-tracing and find the best
         #_score2 = _score2.unsqueeze(1).expand( -1, self.num_samples, -1, -1 )
-        print( "DEBUG: _score2.size():", _score2.size() )
+        #print( "DEBUG: _score2.size():", _score2.size() )
         B, N, C = _score2.shape
         flat_score = _score2.permute(0, 1, 2).reshape(-1, C)
         probs = F.softmax(flat_score / self.temp, dim=-1)
         _index_flat = torch.multinomial(probs, num_samples=1, replacement = True )  
 
         _score_flat = torch.gather(flat_score, -1, _index_flat)
-        print( "DEBUG: _score_flat.size():", _score_flat.size() )
+        #print( "DEBUG: _score_flat.size():", _score_flat.size() )
         _index2 = _index_flat.view(B, self.num_samples, 1)
         _score2 = _score_flat.view(B, self.num_samples, 1)
         current_sampled_index = _index2[:, :] #(B, N, 1 )
