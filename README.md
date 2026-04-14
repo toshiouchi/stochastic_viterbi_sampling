@@ -70,34 +70,46 @@ class StochasticViterbiSample(nn.Module):
             probs = F.softmax(flat_score / self.temp, dim=-1)
             _index_flat = torch.multinomial(probs, num_samples=1)
             _score_flat = torch.gather(flat_score, -1, _index_flat)
-            _index = _index_flat.view(B, W)
-            _score = _score_flat.view(B, W)
+            _index = _index_flat.view(B, W) # bsz, beam
+            _score = _score_flat.view(B, W) # bsz, beam
 
-            _score = _score + beam_emission_scores[:, i] # bsz, beam
-            
-            #if masks is not None:
-            #    score = torch.where(masks[:, i: i+1], _score, score)
-            #    index = torch.where(masks[:, i: i+1], _index, dummy)
-            #else:
-            score, index = _score, _index
-            traj_tokens.append(index)
+            score = _score + beam_emission_scores[:, i]
+            traj_tokens.append(_index)
         
         all_scores = traj_scores
         all_scores.append( score )
         all_scores = torch.stack( all_scores, dim = 0 ).transpose( 0, 1 ).to(device)
         beam_probs = F.softmax( all_scores, dim = 2 )
-
+        
+        
+        #best_score, best_index = score.max(dim=1)
+        #finalized_tokens.append(best_index[:])
+        #finalized_scores.append(best_score[:])
+        
         # now running the back-tracing and find the best
-        best_score, best_index = score.max(dim=1)
-        finalized_tokens.append(best_index[:, None])
-        finalized_scores.append(best_score[:, None])
+        probs = F.softmax(score / self.temp, dim=-1)
+        multi_index = torch.multinomial(probs, num_samples=1) # B x 1
+        multi_score = torch.gather(probs, -1, multi_index)
+        
+        # --- バックトラックの修正案 ---
+        current_idx = multi_index # (B, 1)
+        #res_tokens = [current_idx]
+        finalized_tokens = [current_idx]
+        
+        # traj_tokens: 時刻1〜(T-1)における遷移元ポインタのリスト
+        #for idx in reversed(traj_tokens):
+        #    # 前の時刻のどのビームから来たかを辿る
+        #    current_idx = idx.gather(1, current_idx)
+        #    res_tokens.append(current_idx)
 
         for idx, scs in zip(reversed(traj_tokens), reversed(traj_scores)):
             previous_index = finalized_tokens[-1]
             finalized_tokens.append(idx.gather(1, previous_index))
             finalized_scores.append(scs.gather(1, previous_index))
-
+        
+        #res_tokens.reverse()
         finalized_tokens.reverse()
+        #sampled_beam_idx = torch.cat(res_tokens, 1)
         sampled_beam_idx = torch.cat(finalized_tokens, 1)
         finalized_tokens = beam_targets.gather(2, sampled_beam_idx[:,:,None])[:, :, 0]
 
