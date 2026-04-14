@@ -190,9 +190,21 @@ class StochasticViterbiSamples(nn.Module):
             traj_scores2.append( _score2 )
             _score2 = _score2[:,:,:,None] + beam_transition_matrix[:, i-1,None,:,:].expand( -1, self.num_samples,-1,-1) 
 
+            #B, N, C, W = _score2.shape
+            #flat_score = _score2.permute(0, 3, 1, 2).reshape(-1, C)
             B, N, C, W = _score2.shape
             flat_score = _score2.permute(0, 3, 1, 2).reshape(-1, C)
+            #logits = flat_score / self.temp
             
+            ## --- 高速版 Top-K (行列演算のみ) ---
+            ##top_k = 50 
+            #if self.top_k > 0:
+            #    # 各行の上位k番目の値を取得
+            #    top_k_values, _ = torch.topk(logits, self.top_k, dim=-1)
+            #    # k番目の値より小さいロジットを一括で -inf に置換
+            #    min_values = top_k_values[:, -1].unsqueeze(-1)
+            #    logits = torch.where(logits < min_values, torch.full_like(logits, float('-inf')), logits)
+            ## ---------------------------------
 
             # --- Top-K / Top-P Filtering 開始 (修正版) ---
             logits = flat_score / self.temp
@@ -239,7 +251,7 @@ class StochasticViterbiSamples(nn.Module):
             if torch.isnan(probs).any():
                 probs = torch.ones_like(probs) / probs.size(-1)
 
-             _index_flat = torch.multinomial(probs, num_samples=1, replacement=True)  
+            _index_flat = torch.multinomial(probs, num_samples=1, replacement=True)  
 
             _score_flat = torch.gather(flat_score, -1, _index_flat)
             _index2 = _index_flat.view(B, W, self.num_samples).transpose(1,2)
@@ -257,13 +269,16 @@ class StochasticViterbiSamples(nn.Module):
         all_scores = torch.stack( all_scores, dim = 0 ).transpose( 0, 1 ).to(device)
         beam_probs = F.softmax( all_scores.transpose( 2, 3 ), dim = 2 )
 
- 
+        #best_score, best_index = _score2.max(dim=2)
+        #finalized_tokens.append(best_index[:, None, :])
+        #finalized_scores.append(best_score[:, None, :])
+
         # --- 修正後 ---
         # 最後のステップでサンプリングされたインデックスをそのまま使う
         # _index2 は (Batch, Group, Beam) の形状のはずです        
         # 最後のステップでサンプリングされたインデックスをそのまま使う
         # last_sampled_index (B, N, W) と想定
-        last_sampled_index = _index2 
+        #last_sampled_index = _index2 
         
         # 1. finalized_tokens への追加 (B, 1, N, W にならないよう注意)
         # もし _score2 が (B, N, W) なら、index も (B, N, 1) などにする必要があります
@@ -277,13 +292,13 @@ class StochasticViterbiSamples(nn.Module):
         # 1. まずリストを空にする（重要！）
         finalized_tokens = []
         finalized_scores = []
-
-        # 2. サンプリングされた最後のインデックスを取得 (B, N, 1)
-        # _index2 が (B, W, self.num_samples) の場合、適切にリシェイプ
+        
+        ## 2. サンプリングされた最後のインデックスを取得 (B, N, 1)
+        ## _index2 が (B, W, self.num_samples) の場合、適切にリシェイプ
         # ※ W=1, self.num_samples=16 のケースが多いです
         current_sampled_index = _index2[:, :, 0:1] # (B, W, 1) 
 
-        # 3. 最初の要素として追加
+        ## 3. 最初の要素として追加
         finalized_tokens.append(current_sampled_index) # (B, W, 1)
         finalized_scores.append(_score2.gather(2, current_sampled_index)) # (B, W, 1)
 
@@ -295,6 +310,7 @@ class StochasticViterbiSamples(nn.Module):
             finalized_tokens.append(idx_step.gather(2, previous_pointer))
             finalized_scores.append(scs_step.gather(2, previous_pointer))
 
+        # 5. 逆順にして結合
         # 5. 逆順にして結合 (この時点では [seq_len, B, Group, 1] のリスト)
         finalized_tokens.reverse()
 
@@ -305,11 +321,32 @@ class StochasticViterbiSamples(nn.Module):
         sampled_beam_idx = sampled_beam_idx.permute(0, 2, 1) # [B, S, G]
 
         # 3. gather 実行 (第2次元[Beam方向]から、サンプリングしたインデックスを抽出)
+        #print( "DEBUG sampled_beam_idx.size():", sampled_beam_idx.size() )
+        #print( "DEBUG beam_targets.size():", beam_targets.size() )
+        #DEBUG sampled_beam_idx.size(): torch.Size([64, 776, 1])
+        #DEBUG beam_targets.size(): torch.Size([64, 97, 256])
         finalized_tokens = beam_targets.gather(2, sampled_beam_idx) # [B, S, G]
- 
-        return beam_probs, sampled_beam_idx, finalized_tokens
- 
+        
+        '''
+        best_score, best_index = _score2.max(dim=2)
+        finalized_tokens.append(best_index[:, None, :])
+        finalized_scores.append(best_score[:, None, :])
 
+        for idx, scs in zip(reversed(traj_tokens2), reversed(traj_scores2)):
+            previous_index = finalized_tokens[-1]
+            finalized_tokens.append(idx.gather(2, previous_index))
+            finalized_scores.append(scs.gather(2, previous_index))
+
+        finalized_tokens.reverse()
+        sampled_beam_idx = torch.cat(finalized_tokens, 1)
+        finalized_tokens = beam_targets.gather(2, sampled_beam_idx)        
+        
+        #finalized_scores.reverse()
+        #finalized_scores = torch.cat(finalized_scores, 1)
+        #finalized_scores[:, 1:] = finalized_scores[:, 1:] - finalized_scores[:, :-1]
+        '''
+        
+        return beam_probs, sampled_beam_idx, finalized_tokens
 ```
 num_samples = 16.
 
