@@ -171,6 +171,247 @@ torch.Size([8, 97, 1])
 torch.Size([8, 97])
 ```
 
+# Code that generates a single sample while suppressing repetition.
+
+## Program Policy
+
+Instead of selecting just a single token from sequence *i-1* to transition to a token in sequence *i*, we sample *cand* tokens—using the `num_samples` parameter of the multinomial distribution—and store them in `traj_tokens`. The shape of `traj_tokens` is `(seq_len, bsz, beam, cand)`. During backtracing, when determining the token at *i-1* corresponding to the token at *i*, if the first candidate token has already been used, we select the second one; if a selection is not made by the *cand*-th candidate, we use the *cand*-th token.
+
+When checking for prior usage, beam indices cannot be used directly; therefore, we convert them to the `vocab_size` representation before performing backtracking. Regarding the conversion of `traj_tokens` from beam indices to `vocab_size` indices: we use the `beam_targets` from sequence $i-1$ to update the values ​​(at dimension 2 of `traj_tokens`) via `gather`, and we use the `beam_targets` from sequence $i$ to transform the indices from the beam space to the `vocab_size` space via `scatter`. Here, treating `emissions` as emission probabilities, `beam_targets` is the tensor obtained as follows:
+
+```python
+_, beam_targets = torch.topk( emissions, beam, dim = -1 )
+```
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import BertTokenizer
+
+model_id = "google-bert/bert-large-uncased"
+tokenizer = BertTokenizer.from_pretrained(model_id)
+pad_token_id = tokenizer.pad_token_id
+cls_token_id = tokenizer.cls_token_id
+sep_token_id = tokenizer.sep_token_id
+
+special_tokens_dict = {'additional_special_tokens': ['[unused0]']}
+num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
+special_tokens_dict = {'additional_special_tokens': ['[unused1]']}
+num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
+sos_token_id = tokenizer.encode( "[unused0]" )[1]
+print( "sos_token_id:", sos_token_id )
+eos_token_id = tokenizer.encode( "[unused1]" )[1]
+print( "eos_token_id:", eos_token_id )
+test = tokenizer.decode( sos_token_id )
+print( test )
+test = tokenizer.decode( eos_token_id )
+print( test )
+a_token_id = tokenizer.encode( "a"  )[1]
+print( "a_token_id:", a_token_id )
+the_token_id = tokenizer.encode( "the" )[1]
+and_token_id = tokenizer.encode( "and" )[1]
+in_token_id = tokenizer.encode( "in" )[1]
+of_token_id = tokenizer.encode( "of" )[1]
+on_token_id = tokenizer.encode( "on" )[1]
+at_token_id = tokenizer.encode( "at" )[1]
+to_token_id = tokenizer.encode( "to" )[1]
+for_token_id = tokenizer.encode( "for" )[1]
+from_token_id = tokenizer.encode( "from" )[1]
+with_token_id = tokenizer.encode( "with" )[1]
+by_token_id = tokenizer.encode( "by" )[1]
+we_token_id = tokenizer.encode( "we" )[1]
+i_token_id = tokenizer.encode( "i" )[1]
+he_token_id = tokenizer.encode( "he" )[1]
+she_token_id = tokenizer.encode( "she" )[1]
+it_token_id = tokenizer.encode( "it" )[1]
+they_token_id = tokenizer.encode( "they" )[1]
+period_token_id = tokenizer.encode( "." )[1]
+comma_token_id = tokenizer.encode( "," )[1]
+dbl_token_id = tokenizer.encode( '"' )[1]
+sgl_token_id = tokenizer.encode( "'" )[1]
+
+vocab_size = len( tokenizer )
+
+print( "vocab_size:", vocab_size )
+
+class StochasticViterbiSampleSuppressRepeat(nn.Module):
+    def __init__(self, num_embedding, low_rank=32, beam_size=256, temp = 1.0, cand = 4 ):
+        super().__init__()
+
+        self.E1 = nn.Embedding(num_embedding, low_rank)
+        self.E2 = nn.Embedding(num_embedding, low_rank)
+
+        self.vocab_size = num_embedding
+        self.rank = low_rank
+        self.beam = beam_size
+        self.temp = temp
+        self.cand = cand
+
+    def _compute_stochastic_viterbi_sample(self, emissions, beam=None):
+
+        eps = 1e-8
+        device = emissions.device
+        permit_repeat = [ pad_token_id, eos_token_id, cls_token_id, sep_token_id, a_token_id, the_token_id, period_token_id, \
+                         comma_token_id, and_token_id, in_token_id, we_token_id, i_token_id, he_token_id, she_token_id, \
+                         it_token_id, they_token_id, dbl_token_id, sgl_token_id ]
+
+        
+        beam = beam if beam is not None else self.beam
+        
+        beam_emission_scores, beam_targets = torch.topk( emissions, beam, 2)        
+        
+        batch_size, seq_len = beam_emission_scores.size()[:2]
+
+        beam_transition_score1 = self.E1(beam_targets[:, :-1])  # B x (T-1) x K x D
+        beam_transition_score2 = self.E2(beam_targets[:, 1:])   # B x (T-1) x K x D
+        beam_transition_matrix = torch.bmm(
+            beam_transition_score1.view(-1, beam, self.rank),
+            beam_transition_score2.view(-1, beam, self.rank).transpose(1, 2))
+        beam_transition_matrix = beam_transition_matrix.view(batch_size, -1, beam, beam) # bsz, seq_len, beam, beam
+
+        traj_tokens = []
+        selected_probs = []
+
+        score = beam_emission_scores[:, 0]  # B x K
+        B, C, W = score[:,:,None].expand( -1, -1, beam ).shape
+        flat_score = score[:,:,None].expand( -1, -1, beam ).permute(0, 2, 1).reshape(-1, C)
+        logits = flat_score / self.temp # B*W, C 
+        probs = F.softmax(logits, dim=-1)  # B*W,C この softmax は、C についての softmax     
+
+        _index_flat = torch.multinomial(probs, num_samples=self.cand, replacement=True)  
+        #_index_flat = torch.topk( probs, self.cand, dim = -1 )
+        
+        selected_prob = torch.gather( probs, -1, _index_flat)
+        selected_probs.append( selected_prob.view( B, W, self.cand) )  # (S), B, beam, cand
+        
+        for i in range(1, seq_len):
+            _score = score[:, :, None] + beam_transition_matrix[:, i-1] # bsz, beam, beam
+
+
+            # multinomial selection
+            B, C, W = _score.shape
+            flat_score = _score.permute(0, 2, 1).reshape(-1, C)
+            probs = F.softmax(flat_score / self.temp, dim=-1)
+
+            _index_flat = torch.multinomial(probs, num_samples=self.cand, replacement=False) #B*N*W,cand
+            #_index_flat = torch.topk( probs, self.cand, dim = -1 )
+            _index_flat1 = _index_flat[:,:1]
+            
+            selected_prob = torch.gather( probs, -1, _index_flat)
+            selected_probs.append( selected_prob.view( B, W, self.cand  ) ) # S, B, W = beam, cand
+            
+            _score_flat = torch.gather(flat_score, -1, _index_flat1)
+            _index = _index_flat.view(B, W, self.cand) # B, W, cand
+            _score = _score_flat.view(B, W) # B, W
+
+            _score = _score + beam_emission_scores[:, i]
+            score = _score
+            traj_tokens.append(_index)
+
+        B, C = _score.shape
+        flat_score = _score.reshape(-1, C)
+        probs = F.softmax(flat_score / self.temp, dim=-1)
+        _index_flat = torch.multinomial(probs, num_samples=self.cand, replacement = False ) #B,cand
+        #_index_flat = torch.topk( probs, self.cand, dim = -1 )
+        
+        _score_flat = torch.gather(flat_score, -1, _index_flat)
+        _index = _index_flat.view(B, self.cand)
+        _score = _score_flat.view(B, self.cand)
+        _score = _score.unsqueeze(1).expand(-1,W,-1)
+        current_sampled_index = _index #(B,  cand )
+
+        # --- バックトラックの修正案 ---
+        # beam から vocab_size に戻す。
+        beam_targets1 = beam_targets[:,-1] # B, W
+        current_sampled_index = torch.gather( beam_targets1, -1, current_sampled_index ) #B,cand
+        finalized_tokens = torch.full( ( seq_len , bsz ), self.vocab_size, dtype=torch.long, device=device ) 
+        
+        finalized_tokens[0] = current_sampled_index[:,0]
+        selected_probs = torch.stack( selected_probs, dim = 0 )
+
+        traj_tokens = torch.stack( traj_tokens, dim = 0 )
+        #traj_scores = torch.stack( traj_scores, dim = 0 )
+
+        # beam から vocab_size に戻す。
+        cand_beam_targets = beam_targets.unsqueeze(3).expand( -1, -1, -1, self.cand ) # B, seq_len, W, cand
+        cand_beam_targets = cand_beam_targets.permute( 1, 0, 2, 3 ) #S,B,W,cand
+        cand_beam_targets1 = cand_beam_targets[:-1]
+        cand_beam_targets2 = cand_beam_targets[1:]
+        traj_tokens = torch.gather( cand_beam_targets1, 2, traj_tokens)
+        traj_tokens3 = torch.full( ( seq_len - 1, B, self.vocab_size, self.cand ), self.vocab_size, dtype=torch.long, device = device )
+        traj_tokens3 = torch.scatter( traj_tokens3, 2, index = cand_beam_targets2, src = traj_tokens)
+        traj_tokens3 = traj_tokens3.transpose( 2, 3 )
+
+        # バックトレーシング
+        beam_probs = torch.full( (seq_len,B,W), eps, dtype=torch.float, device=device)
+        beam_probs[0] = selected_probs[-1,:,:,0]
+        for i3, (idx_step, prob_step ) in enumerate( zip(torch.flip(traj_tokens3, dims=(0,)), torch.flip(selected_probs, dims=(0,)) )):
+            i2= i3+1
+            previous_pointer = finalized_tokens[i3]
+            stop_flag = torch.zeros( (B), dtype=torch.int,device=device)
+            for i in range( self.cand ):
+                cand_probs = prob_step[:,:,i]
+                idx = idx_step[:,i].new_empty((idx_step[:,i].size(0), idx_step[:,i].size(1) + 1 ))
+                idx[:,:-1] = idx_step[:,i]
+                idx[:,idx.size(1)-1] = self.vocab_size
+                cand_tokens = torch.gather( idx,-1, previous_pointer.unsqueeze(-1) ).squeeze(-1)# B
+                finalized_tokens2 = finalized_tokens.clone()
+                finalized_tokens2[ i2: ] = -100
+                repeat_mask = ( finalized_tokens2 == cand_tokens  )  # S, B 
+                not_permit_mask = (~torch.isin( finalized_tokens2, torch.tensor( permit_repeat, device=device))).to(torch.int ) 
+                repeat_sum = ( (repeat_mask).to(torch.int) * not_permit_mask ).sum(dim =0 )# B,N
+                if i == self.cand -1:#最終の時は、
+                    chg_flag = ~(stop_flag.to(torch.bool)) #最終の前までに stop が1になれば変えない。stop が0だったら変える。
+                    if i == 0:
+                        chg_flag = torch.ones( (B), dtype=torch.bool,device=device)
+                else:
+                    tmp_flag =  stop_flag + repeat_sum  # stopとrepeat両方が0の時 0
+                    chg_flag = ( tmp_flag == 0 )# stop と　repeat両方が0の時　chgは　true
+                    stop_flag[ stop_flag == 1 ] = 1 # stop が　1のところは stop 1
+                    stop_flag[ chg_flag ] = 1 # chg = True のところも stop 1 
+                finalized_tokens[i2] = torch.where(chg_flag,cand_tokens,finalized_tokens[i2])#(S),B,N True だったら変更、 False だったらそのまま。
+                chg_flag2 = chg_flag.unsqueeze(1).expand(-1,W)
+                beam_probs[i2] = torch.where(chg_flag2,cand_probs,beam_probs[i2])
+
+        beam_probs = torch.flip( beam_probs, dims = ( 0, ) ) # # S,B, N,W　　Sの逆順
+        beam_probs = beam_probs.transpose(0,1) # B,S,N,W
+        beam_probs = F.softmax( beam_probs, dim = 2 ) #W について　softmax S,B,W,N
+        #log_probs = torch.log( beam_probs )
+
+        finalized_tokens = torch.flip( finalized_tokens, dims= (0, ) )
+        finalized_tokens = finalized_tokens.transpose( 0, 1 )#B,S
+
+        # vocab_size のfinalized_tokens から beam の sampled_beam_idx を作る
+        mask = beam_targets == finalized_tokens.unsqueeze(-1) #B,S,W
+
+        sampled_beam_idx = torch.argmax(mask.to(torch.int32), dim=-1)
+        
+        return beam_probs, sampled_beam_idx, finalized_tokens
+```
+```python
+vocab_size = len( tokenizer )
+bsz = 8
+seq_len = 97
+cand = 4 # Number of candidates prepared to suppress repetition
+
+test = StochasticViterbiSampleSuppressRepeat( vocab_size, cand = cand )
+
+emissions = torch.randn( ( bsz, seq_len, vocab_size ) )
+
+beam_probs, sampled_beam_idx, finalized_tokens = test._compute_stochastic_viterbi_sample( emissions )
+
+print( beam_probs.size() )
+print( sampled_beam_idx.size() )
+print( finalized_tokens.size() )
+```
+```python
+torch.Size([8, 97, 256])
+torch.Size([8, 97])
+torch.Size([8, 97])
+```
+
+
 
 # Generate multi samples for GRPO。
 
