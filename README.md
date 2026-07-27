@@ -53,29 +53,17 @@ class StochasticViterbiSample(nn.Module):
         beam_transition_matrix = beam_transition_matrix.view(batch_size, -1, beam, beam) # bsz, seq_len, beam, beam
 
         traj_tokens, traj_scores = [], []
-        finalized_tokens, finalized_scores = [], []
-        selected_probs = []
+        finalized_tokens = []
 
         score = beam_emission_scores[:, 0]  # B x K
-        _score3 = beam_emission_scores[:,0][:,:,None].expand( -1, -1, beam )
-        B, C, W = _score3.shape
-        flat_score = _score3.permute(0, 2, 1).reshape(-1, C)
+        B, C, W = score[:,:,None].expand( -1, -1, beam ).shape
+        flat_score = score[:,:,None].expand( -1, -1, beam ).permute(0, 2, 1).reshape(-1, C)
         logits = flat_score / self.temp # B*W*N, C 
         probs = F.softmax(logits, dim=-1)  # B*W*N,C この softmax は、C についての softmax     
-        # 安全策: 全てが -Inf になった場合の回避
-        if torch.isnan(probs).any():
-            probs = torch.ones_like(probs) / probs.size(-1)
+
         #torch.manual_seed(42)
         _index_flat = torch.multinomial(probs, num_samples=1, replacement=True)  
         #_index_flat = torch.argmax( probs, dim = -1 ).unsqueeze( -1 )
-        
-        all_inf_mask = (logits == float('-inf')).all(dim=-1)
-        if all_inf_mask.any():
-            # 全て-infの行だけ、一様な値をいれる
-            logits[all_inf_mask] = 0.0 
-
-        selected_prob = torch.gather( probs, -1, _index_flat)
-        selected_probs.append( selected_prob.view( B, W) )  # S, B, beam
         
         for i in range(1, seq_len):
             traj_scores.append(score)
@@ -93,62 +81,32 @@ class StochasticViterbiSample(nn.Module):
             _index = _index_flat.view(B, W) # bsz, beam
             _score = _score_flat.view(B, W) # bsz, beam
             
-            all_inf_mask = (logits == float('-inf')).all(dim=-1)
-            if all_inf_mask.any():
-                # 全て-infの行だけ、一様な値をいれる
-                logits[all_inf_mask] = 0.0 
-
-            selected_prob = torch.gather( probs, -1, _index_flat)
-            selected_probs.append( selected_prob.view( B, W ) ) # S, B, W = beam
-            
             score = _score + beam_emission_scores[:, i]
             traj_tokens.append(_index)
-        
-        selected_probs = torch.stack( selected_probs, dim = 0 ) # S, B, beam
-        beam_probs = selected_probs.transpose( 0, 1 ) # B, S, beam
-        beam_probs = F.softmax( beam_probs, dim = 2 ) # B, S, beam → B, S   W についての softmax 一つ一つの B,S について、W = beam についての総和が1の確率
-        #log_probs = torch.log( beam_probs )
-        
-        #best_score, best_index = score.max(dim=1)
-        #finalized_tokens.append(best_index[:])
-        #finalized_scores.append(best_score[:])
+
+        traj_scores.append( score )
+
+        beam_probs = torch.stack( traj_scores, dim = 0 ) # S, B, beam
+        beam_probs = beam_probs.transpose( 0, 1 ) # B, S, beam
+        log_beam_probs = F.log_softmax( beam_probs, dim = 2 ) # B, S, beam → B, S   W についての softmax 一つ一つの B,S について、W = beam についての総和が1の確率
         
         # now running the back-tracing and find the best
         probs = F.softmax(score / self.temp, dim=-1)
-        multi_index = torch.multinomial(probs, num_samples=1) # B x 1
-        multi_score = torch.gather(probs, -1, multi_index)
+        best_index = torch.multinomial(probs, num_samples=1) # B x 1
+        best_score = torch.gather(probs, -1, best_index)
         
         # --- バックトラックの修正案 ---
-        current_idx = multi_index # (B, 1)
-        #res_tokens = [current_idx]
-        finalized_tokens = [current_idx]
+        finalized_tokens.append( best_index )
         
-        # traj_tokens: 時刻1〜(T-1)における遷移元ポインタのリスト
-        #for idx in reversed(traj_tokens):
-        #    # 前の時刻のどのビームから来たかを辿る
-        #    current_idx = idx.gather(1, current_idx)
-        #    res_tokens.append(current_idx)
-
-        for idx, scs in zip(reversed(traj_tokens), reversed(traj_scores)):
+        for idx in reversed(traj_tokens):
             previous_index = finalized_tokens[-1]
             finalized_tokens.append(idx.gather(1, previous_index))
-            finalized_scores.append(scs.gather(1, previous_index))
         
-        #res_tokens.reverse()
         finalized_tokens.reverse()
-        #sampled_beam_idx = torch.cat(res_tokens, 1)
         sampled_beam_idx = torch.cat(finalized_tokens, 1)
         finalized_tokens = beam_targets.gather(2, sampled_beam_idx[:,:,None])[:, :, 0]
 
-        finalized_scores.reverse()
-        finalized_scores = torch.cat(finalized_scores, 1)
-        finalized_scores[:, 1:] = finalized_scores[:, 1:] - finalized_scores[:, :-1]
-
-        return beam_probs, sampled_beam_idx.unsqueeze(-1), finalized_tokens
-
-        
-
-        return beam_probs, sampled_beam_idx.unsqueeze(-1), finalized_tokens
+        return log_beam_probs, sampled_beam_idx, finalized_tokens      
 ```
 ```python
 vocab_size = 30000
@@ -159,15 +117,19 @@ test = StochasticViterbiSample( vocab_size )
 
 emissions = torch.randn( ( bsz, seq_len, vocab_size ) )
 
-beam_probs, sampled_beam_idx, finalized_tokens = test._compute_stochastic_viterbi_sample( emissions )
+log_beam_probs, sampled_beam_idx, finalized_tokens = test._compute_stochastic_viterbi_sample( emissions )
 
-print( beam_probs.size() )
+print( log_beam_probs.size() )
 print( sampled_beam_idx.size() )
 print( finalized_tokens.size() )
+
+sampled_log_probs = torch.gather( log_beam_probs, -1, sampled_beam_idx.unsqueeze(-1)).squeeze(-1)
+print( sampled_log_probs.size() )
 ```
 ```
 torch.Size([8, 97, 256])
-torch.Size([8, 97, 1])
+torch.Size([8, 97])
+torch.Size([8, 97])
 torch.Size([8, 97])
 ```
 
