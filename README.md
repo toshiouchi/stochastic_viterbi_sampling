@@ -156,7 +156,8 @@ tokenizer = BertTokenizer.from_pretrained(model_id)
 pad_token_id = tokenizer.pad_token_id
 cls_token_id = tokenizer.cls_token_id
 sep_token_id = tokenizer.sep_token_id
-
+# 2. 新しい特殊トークンを登録
+# 2. 新しい特殊トークンを登録
 special_tokens_dict = {'additional_special_tokens': ['[unused0]']}
 num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
 special_tokens_dict = {'additional_special_tokens': ['[unused1]']}
@@ -193,9 +194,11 @@ comma_token_id = tokenizer.encode( "," )[1]
 dbl_token_id = tokenizer.encode( '"' )[1]
 sgl_token_id = tokenizer.encode( "'" )[1]
 
+# 辞書サイズを保存
 vocab_size = len( tokenizer )
 
 print( "vocab_size:", vocab_size )
+
 
 class StochasticViterbiSampleSuppressRepeat(nn.Module):
     def __init__(self, num_embedding, low_rank=32, beam_size=256, temp = 1.0, cand = 4 ):
@@ -233,7 +236,7 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
         beam_transition_matrix = beam_transition_matrix.view(batch_size, -1, beam, beam) # bsz, seq_len, beam, beam
 
         traj_tokens = []
-        selected_probs = []
+        traj_scores = []
 
         score = beam_emission_scores[:, 0]  # B x K
         B, C, W = score[:,:,None].expand( -1, -1, beam ).shape
@@ -243,13 +246,13 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
 
         _index_flat = torch.multinomial(probs, num_samples=self.cand, replacement=True)  
         #_index_flat = torch.topk( probs, self.cand, dim = -1 )
-        
-        selected_prob = torch.gather( probs, -1, _index_flat)
-        selected_probs.append( selected_prob.view( B, W, self.cand) )  # (S), B, beam, cand
+
+        score2 = torch.gather( probs, -1, _index_flat )
+        score2 = score2.view( B, W, self.cand )
         
         for i in range(1, seq_len):
+            traj_scores.append( score2 )
             _score = score[:, :, None] + beam_transition_matrix[:, i-1] # bsz, beam, beam
-
 
             # multinomial selection
             B, C, W = _score.shape
@@ -260,17 +263,20 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
             #_index_flat = torch.topk( probs, self.cand, dim = -1 )
             _index_flat1 = _index_flat[:,:1]
             
-            selected_prob = torch.gather( probs, -1, _index_flat)
-            selected_probs.append( selected_prob.view( B, W, self.cand  ) ) # S, B, W = beam, cand
-            
             _score_flat = torch.gather(flat_score, -1, _index_flat1)
+            _score_flat2 = torch.gather(flat_score, -1, _index_flat)
             _index = _index_flat.view(B, W, self.cand) # B, W, cand
             _score = _score_flat.view(B, W) # B, W
+            _score2 = _score_flat2.view(B, W, self.cand )
 
             _score = _score + beam_emission_scores[:, i]
             score = _score
+            _score2 = _score2 + beam_emission_scores[:, i].unsqueeze(-1).expand( -1, -1, self.cand )
+            score2 = _score2
             traj_tokens.append(_index)
 
+        traj_scores.append( score2 )
+        
         B, C = _score.shape
         flat_score = _score.reshape(-1, C)
         probs = F.softmax(flat_score / self.temp, dim=-1)
@@ -279,8 +285,8 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
         
         _score_flat = torch.gather(flat_score, -1, _index_flat)
         _index = _index_flat.view(B, self.cand)
-        _score = _score_flat.view(B, self.cand)
-        _score = _score.unsqueeze(1).expand(-1,W,-1)
+        #_score = _score_flat.view(B, self.cand)
+        #_score = _score.unsqueeze(1).expand(-1,W,-1)
         current_sampled_index = _index #(B,  cand )
 
         # --- バックトラックの修正案 ---
@@ -290,7 +296,7 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
         finalized_tokens = torch.full( ( seq_len , bsz ), self.vocab_size, dtype=torch.long, device=device ) 
         
         finalized_tokens[0] = current_sampled_index[:,0]
-        selected_probs = torch.stack( selected_probs, dim = 0 )
+        traj_scores = torch.stack( traj_scores, dim = 0 )
 
         traj_tokens = torch.stack( traj_tokens, dim = 0 )
         #traj_scores = torch.stack( traj_scores, dim = 0 )
@@ -307,8 +313,8 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
 
         # バックトレーシング
         beam_probs = torch.full( (seq_len,B,W), eps, dtype=torch.float, device=device)
-        beam_probs[0] = selected_probs[-1,:,:,0]
-        for i3, (idx_step, prob_step ) in enumerate( zip(torch.flip(traj_tokens3, dims=(0,)), torch.flip(selected_probs, dims=(0,)) )):
+        beam_probs[0] = traj_scores[-1,:,:,0]
+        for i3, (idx_step, prob_step ) in enumerate( zip(torch.flip(traj_tokens3, dims=(0,)), torch.flip(traj_scores, dims=(0,)) )):
             i2= i3+1
             previous_pointer = finalized_tokens[i3]
             stop_flag = torch.zeros( (B), dtype=torch.int,device=device)
@@ -338,37 +344,40 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
 
         beam_probs = torch.flip( beam_probs, dims = ( 0, ) ) # # S,B, N,W　　Sの逆順
         beam_probs = beam_probs.transpose(0,1) # B,S,N,W
-        beam_probs = F.softmax( beam_probs, dim = 2 ) #W について　softmax S,B,W,N
-        #log_probs = torch.log( beam_probs )
+        log_beam_probs = F.log_softmax( beam_probs, dim = 2 ) #W について　softmax S,B,W,N
 
         finalized_tokens = torch.flip( finalized_tokens, dims= (0, ) )
         finalized_tokens = finalized_tokens.transpose( 0, 1 )#B,S
 
         # vocab_size のfinalized_tokens から beam の sampled_beam_idx を作る
         mask = beam_targets == finalized_tokens.unsqueeze(-1) #B,S,W
-
+        # 2. ビーム次元 (-1) で一致しているインデックスを取得
         sampled_beam_idx = torch.argmax(mask.to(torch.int32), dim=-1)
         
-        return beam_probs, sampled_beam_idx, finalized_tokens
+        return log_beam_probs, sampled_beam_idx, finalized_tokens
 ```
 ```python
 vocab_size = len( tokenizer )
 bsz = 8
 seq_len = 97
-cand = 4 # Number of candidates prepared to suppress repetition
+cand = 4 # 繰り返しを抑制するために準備する候補の数
 
 test = StochasticViterbiSampleSuppressRepeat( vocab_size, cand = cand )
 
 emissions = torch.randn( ( bsz, seq_len, vocab_size ) )
 
-beam_probs, sampled_beam_idx, finalized_tokens = test._compute_stochastic_viterbi_sample( emissions )
+log_beam_probs, sampled_beam_idx, finalized_tokens = test._compute_stochastic_viterbi_sample( emissions )
 
-print( beam_probs.size() )
+print( log_beam_probs.size() )
 print( sampled_beam_idx.size() )
 print( finalized_tokens.size() )
-```
+
+sampled_log_probs = torch.gather( log_beam_probs, -1, sampled_beam_idx.unsqueeze(-1) ).squeeze(-1)
+
+print( sampled_log_probs.size() )```
 ```python
 torch.Size([8, 97, 256])
+torch.Size([8, 97])
 torch.Size([8, 97])
 torch.Size([8, 97])
 ```
