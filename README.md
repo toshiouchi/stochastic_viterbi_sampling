@@ -77,7 +77,7 @@ class StochasticViterbiSample(nn.Module):
             flat_score = _score.permute(0, 2, 1).reshape(-1, C)
             probs = F.softmax(flat_score / self.temp, dim=-1)
             _index_flat = torch.multinomial(probs, num_samples=1, replacement=True )
-            _score_flat = torch.gather(flat_score, -1, _index_flat)
+            _score_flat = torch.gather(probs, -1, _index_flat)
             _index = _index_flat.view(B, W) # bsz, beam
             _score = _score_flat.view(B, W) # bsz, beam
             
@@ -106,7 +106,7 @@ class StochasticViterbiSample(nn.Module):
         sampled_beam_idx = torch.cat(finalized_tokens, 1)
         finalized_tokens = beam_targets.gather(2, sampled_beam_idx[:,:,None])[:, :, 0]
 
-        return log_beam_probs, sampled_beam_idx, finalized_tokens      
+        return log_beam_probs, sampled_beam_idx, finalized_tokens             
 ```
 ```python
 vocab_size = 30000
@@ -263,8 +263,8 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
             #_index_flat = torch.topk( probs, self.cand, dim = -1 )
             _index_flat1 = _index_flat[:,:1]
             
-            _score_flat = torch.gather(flat_score, -1, _index_flat1)
-            _score_flat2 = torch.gather(flat_score, -1, _index_flat)
+            _score_flat = torch.gather(probs, -1, _index_flat1)
+            _score_flat2 = torch.gather(probs, -1, _index_flat)
             _index = _index_flat.view(B, W, self.cand) # B, W, cand
             _score = _score_flat.view(B, W) # B, W
             _score2 = _score_flat2.view(B, W, self.cand )
@@ -283,7 +283,7 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
         _index_flat = torch.multinomial(probs, num_samples=self.cand, replacement = False ) #B,cand
         #_index_flat = torch.topk( probs, self.cand, dim = -1 )
         
-        _score_flat = torch.gather(flat_score, -1, _index_flat)
+        _score_flat = torch.gather(probs, -1, _index_flat)
         _index = _index_flat.view(B, self.cand)
         #_score = _score_flat.view(B, self.cand)
         #_score = _score.unsqueeze(1).expand(-1,W,-1)
@@ -360,7 +360,7 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
 vocab_size = len( tokenizer )
 bsz = 8
 seq_len = 97
-cand = 4 # 繰り返しを抑制するために準備する候補の数
+cand = 4 # Number of candidates prepared to suppress repetition
 
 test = StochasticViterbiSampleSuppressRepeat( vocab_size, cand = cand )
 
@@ -501,7 +501,7 @@ class StochasticViterbiSamples(nn.Module):
             _index_flat = torch.multinomial(probs, num_samples=1, replacement=True) 
             #_index_flat = torch.argmax( probs, dim = -1 ).unsqueeze( -1 )
             
-            _score_flat = torch.gather(flat_score, -1, _index_flat)
+            _score_flat = torch.gather(probs, -1, _index_flat)
             _index = _index_flat.view(B, W, self.num_samples).transpose(1,2)
             _score = _score_flat.view(B, W, self.num_samples).transpose(1,2)
 
@@ -531,7 +531,7 @@ class StochasticViterbiSamples(nn.Module):
         _index_flat = torch.multinomial(probs, num_samples=1, replacement = True )  
         #_index_flat = torch.argmax( probs, dim = -1 ).unsqueeze( -1 )
         
-        _score_flat = torch.gather(flat_score, -1, _index_flat)
+        _score_flat = torch.gather(probs, -1, _index_flat)
         _index = _index_flat.view(B, self.num_samples, 1)
         _score = _score_flat.view(B, self.num_samples, 1)
         current_sampled_index = _index[:, :] #(B, N, 1 )
@@ -556,8 +556,7 @@ class StochasticViterbiSamples(nn.Module):
         # 3. gather 実行 (第2次元[Beam方向]から、サンプリングしたインデックスを抽出)
         finalized_tokens = beam_targets.gather(2, sampled_beam_idx) # [B, S, G]
         
-        return log_beam_probs, sampled_beam_idx, finalized_tokens 
- 
+        return log_beam_probs, sampled_beam_idx, finalized_tokens  
 ```
 num_samples = 16.
 
