@@ -95,7 +95,6 @@ class StochasticViterbiSample(nn.Module):
         best_index = torch.multinomial(probs, num_samples=1) # B x 1
         best_score = torch.gather(probs, -1, best_index)
         
-        # --- バックトラックの修正案 ---
         finalized_tokens.append( best_index )
         
         for idx in reversed(traj_tokens):
@@ -435,11 +434,9 @@ score = beam_emission_scores[:, 0]  # B x K
 for i in range(1, seq_len):
     _score = score[:, :, None] + beam_transition_matrix[:, i-1] # bsz, beam, beam
     _scores, _indexes = torch.topk( _score, self.cand, dim = 1 ) # B, cand, W 
-    _score, _index = _score.max(dim=1) # bsz, beam     bsz, beam  step i-1 における 256 → 256 の max から 256 への遷移確率と 
-                                    # 256 → 256 の前の 256 の max のインデックストークン
-                                    # index b * 256 の 位置が i の token で、値が i-1 のtoken   
-    
-    _score = _score + beam_emission_scores[:, i] # bsz, beam i における 256 の遷移確率ではない確率を加える。i における 256 の全確率。
+    _score, _index = _score.max(dim=1) # bsz, beam     bsz, beam
+
+    _score = _score + beam_emission_scores[:, i] # bsz, beam 
 
     #if masks is not None:
     #    score = torch.where(masks[:, i: i+1], _score, score)
@@ -451,18 +448,18 @@ for i in range(1, seq_len):
 _, _indexes = torch.topk( _score, self.cand, dim = 1 )
 current_sampled_index = _indexes #(B,cand )
 
-# beam から vocab_size に戻す。
+# return from beam to vocab_size
 beam_targets1 = beam_targets[:,-1] # B, W
 current_sampled_index = torch.gather( beam_targets1, -1, current_sampled_index ) #B,cand
 
 finalized_tokens = torch.full( (seq_len,B), self.vocab_size , dtype=torch.long, device=device)
 
-## 3. 最初の要素として追加
+## 3. first element
 finalized_tokens[0] = current_sampled_index[:,0] # (S), B
 
 traj_tokens = torch.stack( traj_tokens, dim = 0 ) # S, B, cand, W
 
-# beam から vocab_size に戻す。
+# return from beam to vocab_size
 cand_beam_targets = beam_targets.unsqueeze(2).expand( -1, -1, self.cand, -1 ) # B, seq_len, cand, W
 cand_beam_targets = cand_beam_targets.permute( 1, 0, 2, 3 ) #S,B,cand,W
 cand_beam_targets1 = cand_beam_targets[:-1]
@@ -474,27 +471,27 @@ traj_tokens3 = torch.scatter( traj_tokens3, -1, index = cand_beam_targets2, src 
 for i3, idx_step in enumerate( torch.flip(traj_tokens3, dims=(0,)) ):
     i2= i3+1
     previous_pointer = finalized_tokens[i3]
-    stop_flag = torch.zeros( (B), dtype=torch.int,device=device) # stop_flag が 0 の時 更新 OK, 1の時、これ以上更新しない。
+    stop_flag = torch.zeros( (B), dtype=torch.int,device=device) # when stop_flag is 0, update is ok. when stop_flag is 1,no more update。
     for i in range( self.cand ):
         idx = idx_step[:,i].new_empty((idx_step[:,i].size(0), idx_step[:,i].size(1)+1 ))
         idx[:,:-1] = idx_step[:,i]
         idx[:,idx.size(1)-1] = self.vocab_size
-        cand_tokens = torch.gather( idx,-1, previous_pointer.unsqueeze(-1) ).squeeze(-1)# B,N　更新の候補を作成。
+        cand_tokens = torch.gather( idx,-1, previous_pointer.unsqueeze(-1) ).squeeze(-1)# B,N　candidates of update is created.
         finalized_tokens2 = finalized_tokens.clone()
         finalized_tokens2[ i2: ] = -100 # 現在の時刻より先は -100
-        repeat_mask = ( finalized_tokens2 == cand_tokens  )  # S, B 繰り返しの場所を特定する　mask 
+        repeat_mask = ( finalized_tokens2 == cand_tokens  )  # S, B  
         not_permit_mask = (~torch.isin( finalized_tokens2, torch.tensor( permit_repeat, device=device))).to(torch.int ) 
-        repeat_sum = ( (repeat_mask).to(torch.int) * not_permit_mask ).sum(dim =0 )# B 繰り返しの場所に繰り返しが許可されたトークンの場所をかけて和をとることにより、B の形状の繰り返しがある時1 以上、ない時0 を 得る。
-        if i == self.cand -1:#最終の時は、
-            chg_flag = ~(stop_flag.to(torch.bool)) #最終の前までに stop が1になれば変えない。stop が0だったら変える。
+        repeat_sum = ( (repeat_mask).to(torch.int) * not_permit_mask ).sum(dim =0 )# B 
+        if i == self.cand -1:
+            chg_flag = ~(stop_flag.to(torch.bool)) # before last if stop_flag became 1, no change. if stop_flag is 0  change.
             if i == 0:
                 chg_flag = torch.ones( (B,N), dtype=torch.bool,device=device)
         else:
-            tmp_flag =  stop_flag + repeat_sum  # stopとrepeat両方が0の時 0
-            chg_flag = ( tmp_flag == 0 )# stop と　repeat両方が0の時　chgは　true
-            stop_flag[ stop_flag == 1 ] = 1 # stop_flag が 1の場合は stop_flag =1
-            stop_flag[ chg_flag ] = 1 #chg_flag = True の場合は、更新されたのだから stop_flag = 1
-        finalized_tokens[i2] = torch.where(chg_flag,cand_tokens,finalized_tokens[i2])#(S),B True だったら変更、 False だったらそのまま。
+            tmp_flag =  stop_flag + repeat_sum  # when both of stop and repeat are 0. tmp_flag is 0.
+            chg_flag = ( tmp_flag == 0 )# when both of stop and repeat are 0,　chg_flag is true
+            stop_flag[ stop_flag == 1 ] = 1 # where stop is　1, set stop_flag to 1.
+            stop_flag[ chg_flag ] = 1 # where chg = True, set stop to 1
+        finalized_tokens[i2] = torch.where(chg_flag,cand_tokens,finalized_tokens[i2])#(S),B
 
 finalized_tokens = torch.flip( finalized_tokens, dims= (0, ) )
 finalized_tokens = finalized_tokens.transpose( 0, 1 )#B,S,N
