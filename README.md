@@ -247,7 +247,7 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
         _index_flat = torch.multinomial(probs, num_samples=self.cand, replacement=True)  
         #_index_flat = torch.topk( probs, self.cand, dim = -1 )
 
-        score2 = torch.gather( probs, -1, _index_flat )
+        score2 = torch.gather( flat_score, -1, _index_flat )
         score2 = score2.view( B, W, self.cand )
         
         for i in range(1, seq_len):
@@ -283,7 +283,7 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
         _index_flat = torch.multinomial(probs, num_samples=self.cand, replacement = False ) #B,cand
         #_index_flat = torch.topk( probs, self.cand, dim = -1 )
         
-        _score_flat = torch.gather(probs, -1, _index_flat)
+        _score_flat = torch.gather(flat_score, -1, _index_flat)
         _index = _index_flat.view(B, self.cand)
         #_score = _score_flat.view(B, self.cand)
         #_score = _score.unsqueeze(1).expand(-1,W,-1)
