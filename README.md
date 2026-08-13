@@ -77,7 +77,7 @@ class StochasticViterbiSample(nn.Module):
             flat_score = _score.permute(0, 2, 1).reshape(-1, C)
             probs = F.softmax(flat_score / self.temp, dim=-1)
             _index_flat = torch.multinomial(probs, num_samples=1, replacement=True )
-            _score_flat = torch.gather(probs, -1, _index_flat)
+            _score_flat = torch.gather(flat_score, -1, _index_flat)
             _index = _index_flat.view(B, W) # bsz, beam
             _score = _score_flat.view(B, W) # bsz, beam
             
@@ -263,8 +263,8 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
             #_index_flat = torch.topk( probs, self.cand, dim = -1 )
             _index_flat1 = _index_flat[:,:1]
             
-            _score_flat = torch.gather(probs, -1, _index_flat1)
-            _score_flat2 = torch.gather(probs, -1, _index_flat)
+            _score_flat = torch.gather(flat_score, -1, _index_flat1)
+            _score_flat2 = torch.gather(flat_score, -1, _index_flat)
             _index = _index_flat.view(B, W, self.cand) # B, W, cand
             _score = _score_flat.view(B, W) # B, W
             _score2 = _score_flat2.view(B, W, self.cand )
@@ -559,7 +559,7 @@ class StochasticViterbiSamples(nn.Module):
 
         #torch.manual_seed(42)
         _index_flat = torch.multinomial(probs, num_samples=1, replacement=True)  
-        #_index_flat = torch.argmax( probs, dim = -1 ).unsqueeze( -1 )
+        #_index_flat = torch.argmax( flat_score, dim = -1 ).unsqueeze( -1 )
         
         score2 = torch.gather( probs, -1, _index_flat ).view( B, N, W )
         
@@ -619,7 +619,7 @@ class StochasticViterbiSamples(nn.Module):
             _index_flat = torch.multinomial(probs, num_samples=1, replacement=True) 
             #_index_flat = torch.argmax( probs, dim = -1 ).unsqueeze( -1 )
             
-            _score_flat = torch.gather(probs, -1, _index_flat)
+            _score_flat = torch.gather(flat_score, -1, _index_flat)
             _index = _index_flat.view(B, W, self.num_samples).transpose(1,2)
             _score = _score_flat.view(B, W, self.num_samples).transpose(1,2)
 
