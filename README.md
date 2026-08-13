@@ -156,8 +156,8 @@ tokenizer = BertTokenizer.from_pretrained(model_id)
 pad_token_id = tokenizer.pad_token_id
 cls_token_id = tokenizer.cls_token_id
 sep_token_id = tokenizer.sep_token_id
-# 2. 新しい特殊トークンを登録
-# 2. 新しい特殊トークンを登録
+
+# register new special tokens
 special_tokens_dict = {'additional_special_tokens': ['[unused0]']}
 num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
 special_tokens_dict = {'additional_special_tokens': ['[unused1]']}
@@ -194,7 +194,7 @@ comma_token_id = tokenizer.encode( "," )[1]
 dbl_token_id = tokenizer.encode( '"' )[1]
 sgl_token_id = tokenizer.encode( "'" )[1]
 
-# 辞書サイズを保存
+# dictionary size
 vocab_size = len( tokenizer )
 
 print( "vocab_size:", vocab_size )
@@ -242,7 +242,7 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
         B, C, W = score[:,:,None].expand( -1, -1, beam ).shape
         flat_score = score[:,:,None].expand( -1, -1, beam ).permute(0, 2, 1).reshape(-1, C)
         logits = flat_score / self.temp # B*W, C 
-        probs = F.softmax(logits, dim=-1)  # B*W,C この softmax は、C についての softmax     
+        probs = F.softmax(logits, dim=-1)  # B*W,C This softmax is the softmax with respect to C.
 
         _index_flat = torch.multinomial(probs, num_samples=self.cand, replacement=True)  
         #_index_flat = torch.topk( probs, self.cand, dim = -1 )
@@ -289,8 +289,7 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
         #_score = _score.unsqueeze(1).expand(-1,W,-1)
         current_sampled_index = _index #(B,  cand )
 
-        # --- バックトラックの修正案 ---
-        # beam から vocab_size に戻す。
+       # return from beam to vocab_size.
         beam_targets1 = beam_targets[:,-1] # B, W
         current_sampled_index = torch.gather( beam_targets1, -1, current_sampled_index ) #B,cand
         finalized_tokens = torch.full( ( seq_len , bsz ), self.vocab_size, dtype=torch.long, device=device ) 
@@ -301,7 +300,7 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
         traj_tokens = torch.stack( traj_tokens, dim = 0 )
         #traj_scores = torch.stack( traj_scores, dim = 0 )
 
-        # beam から vocab_size に戻す。
+        # return from beam to vocab_size.
         cand_beam_targets = beam_targets.unsqueeze(3).expand( -1, -1, -1, self.cand ) # B, seq_len, W, cand
         cand_beam_targets = cand_beam_targets.permute( 1, 0, 2, 3 ) #S,B,W,cand
         cand_beam_targets1 = cand_beam_targets[:-1]
@@ -311,7 +310,7 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
         traj_tokens3 = torch.scatter( traj_tokens3, 2, index = cand_beam_targets2, src = traj_tokens)
         traj_tokens3 = traj_tokens3.transpose( 2, 3 )
 
-        # バックトレーシング
+        # back trace
         beam_probs = torch.full( (seq_len,B,W), eps, dtype=torch.float, device=device)
         beam_probs[0] = traj_scores[-1,:,:,0]
         for i3, (idx_step, prob_step ) in enumerate( zip(torch.flip(traj_tokens3, dims=(0,)), torch.flip(traj_scores, dims=(0,)) )):
@@ -329,29 +328,28 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
                 repeat_mask = ( finalized_tokens2 == cand_tokens  )  # S, B 
                 not_permit_mask = (~torch.isin( finalized_tokens2, torch.tensor( permit_repeat, device=device))).to(torch.int ) 
                 repeat_sum = ( (repeat_mask).to(torch.int) * not_permit_mask ).sum(dim =0 )# B,N
-                if i == self.cand -1:#最終の時は、
-                    chg_flag = ~(stop_flag.to(torch.bool)) #最終の前までに stop が1になれば変えない。stop が0だったら変える。
+                if i == self.cand -1:
+                    chg_flag = ~(stop_flag.to(torch.bool)) # before last if stop_flag became 1, no change. if stop_flag is 0  change。
                     if i == 0:
                         chg_flag = torch.ones( (B), dtype=torch.bool,device=device)
                 else:
-                    tmp_flag =  stop_flag + repeat_sum  # stopとrepeat両方が0の時 0
-                    chg_flag = ( tmp_flag == 0 )# stop と　repeat両方が0の時　chgは　true
-                    stop_flag[ stop_flag == 1 ] = 1 # stop が　1のところは stop 1
-                    stop_flag[ chg_flag ] = 1 # chg = True のところも stop 1 
-                finalized_tokens[i2] = torch.where(chg_flag,cand_tokens,finalized_tokens[i2])#(S),B,N True だったら変更、 False だったらそのまま。
+                    tmp_flag =  stop_flag + repeat_sum  # when both of stop and repeat are 0. tmp_flag is 0.
+                    chg_flag = ( tmp_flag == 0 )# when both of stop and repeat are 0,　chg_flag is true
+                    stop_flag[ stop_flag == 1 ] = 1 # where stop is　1, set stop_flag to 1.
+                    stop_flag[ chg_flag ] = 1 # where chg = True, set stop to 1 
+                finalized_tokens[i2] = torch.where(chg_flag,cand_tokens,finalized_tokens[i2])#(S),B,N if chg_flag is True, finalized_tokens changes、 is False no change。
                 chg_flag2 = chg_flag.unsqueeze(1).expand(-1,W)
                 beam_probs[i2] = torch.where(chg_flag2,cand_probs,beam_probs[i2])
 
-        beam_probs = torch.flip( beam_probs, dims = ( 0, ) ) # # S,B, N,W　　Sの逆順
+        beam_probs = torch.flip( beam_probs, dims = ( 0, ) ) # # S,B, N,W
         beam_probs = beam_probs.transpose(0,1) # B,S,N,W
-        log_beam_probs = F.log_softmax( beam_probs, dim = 2 ) #W について　softmax S,B,W,N
+        log_beam_probs = F.log_softmax( beam_probs, dim = 2 ) # S,B,W,N, softmax about W
 
         finalized_tokens = torch.flip( finalized_tokens, dims= (0, ) )
         finalized_tokens = finalized_tokens.transpose( 0, 1 )#B,S
 
-        # vocab_size のfinalized_tokens から beam の sampled_beam_idx を作る
+        # change represents with vocab_size to with beam
         mask = beam_targets == finalized_tokens.unsqueeze(-1) #B,S,W
-        # 2. ビーム次元 (-1) で一致しているインデックスを取得
         sampled_beam_idx = torch.argmax(mask.to(torch.int32), dim=-1)
         
         return log_beam_probs, sampled_beam_idx, finalized_tokens
