@@ -199,8 +199,6 @@ tokenizer = BertTokenizer.from_pretrained(model_id)
 pad_token_id = tokenizer.pad_token_id
 cls_token_id = tokenizer.cls_token_id
 sep_token_id = tokenizer.sep_token_id
-# 2. 新しい特殊トークンを登録
-# 2. 新しい特殊トークンを登録
 special_tokens_dict = {'additional_special_tokens': ['[unused0]']}
 num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
 special_tokens_dict = {'additional_special_tokens': ['[unused1]']}
@@ -331,9 +329,9 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
             logits = new_logits
 
             if torch.all(logits == float('inf')):
-                logits = torch.ones_like(logits)  # テンソル全体を1にする場合
+                logits = torch.ones_like(logits) 
             
-            probs = F.softmax(logits, dim=-1) # B*W*N,C この softmax は、C についての softmax
+            probs = F.softmax(logits, dim=-1) 
 
             _index_flat = torch.multinomial(probs, num_samples=self.cand, replacement=False) #B*N*W,cand
             _index_flat1 = _index_flat[:,:1]
