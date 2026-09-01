@@ -305,7 +305,7 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
             logits = flat_score / self.temp #B*W*N,C
 
             if self.top_k > 0:
-                top_k_val = min(self.top_k, logits.size(-1)) # top_kが語彙数より大きくならないように調整
+                top_k_val = min(self.top_k, logits.size(-1)) 
                 top_k_logits, top_k_indices = torch.topk(logits, top_k_val, dim=-1)
 
                 min_values = top_k_logits[:, -1].unsqueeze(-1)
