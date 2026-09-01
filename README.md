@@ -177,7 +177,7 @@ torch.Size([8, 97])
 torch.Size([8, 97])
 ```
 
-# Code that generates a single sample while suppressing repetition.
+# Code that generates samples while suppressing repetition.
 
 ## Program Policy
 
