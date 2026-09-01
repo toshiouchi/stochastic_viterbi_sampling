@@ -76,7 +76,7 @@ class StochasticViterbiSample(nn.Module):
             # --- Top-K / Top-P Filtering 開始 (修正版) ---
             logits = flat_score / self.temp #B*W*N,C
 
-            probs = F.softmax(logits, dim=-1) # B*W*N,C この softmax は、C についての softmax
+            probs = F.softmax(logits, dim=-1) 
 
             _index_flat = torch.multinomial(probs, num_samples=1, replacement=False) #B*N*W,1
 
