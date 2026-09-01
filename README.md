@@ -73,7 +73,6 @@ class StochasticViterbiSample(nn.Module):
             B, C, W = _score_matrix.shape
             flat_score = _score_matrix.permute(0, 1, 2 ).reshape(-1, C)
 
-            # --- Top-K / Top-P Filtering 開始 (修正版) ---
             logits = flat_score / self.temp #B*W*N,C
 
             probs = F.softmax(logits, dim=-1) 
