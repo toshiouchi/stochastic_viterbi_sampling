@@ -87,7 +87,6 @@ class StochasticViterbiSample(nn.Module):
             
             traj_tokens.append( index ) # S, B, N, W, cand
 
-        ## 2. サンプリングされた最後のインデックスを取得 (B, N, 1)
         B, C = score.shape
         flat_score = score.reshape(-1, C)
 
@@ -101,7 +100,6 @@ class StochasticViterbiSample(nn.Module):
         best_index = torch.multinomial(probs, num_samples=1) # B x 1
         best_score = torch.gather(probs, -1, best_index)
         
-        # --- バックトラックの修正案 ---
         finalized_tokens.append( best_index )
 
         if sampled_beam_idx_flag:
@@ -121,7 +119,7 @@ class StochasticViterbiSample(nn.Module):
         finalized_tokens = beam_targets.gather(2, sampled_beam_idx[:,:,None])[:, :, 0]
 
         if not sampled_beam_idx_flag:
-            # バックトレーシング
+            # backtrace
             beam_logits = []
             for i3, step_logit in enumerate( reversed( step_logits )):
                 i4 = seq_len - i3 - 1
