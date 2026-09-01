@@ -238,7 +238,6 @@ comma_token_id = tokenizer.encode( "," )[1]
 dbl_token_id = tokenizer.encode( '"' )[1]
 sgl_token_id = tokenizer.encode( "'" )[1]
 
-# 辞書サイズを保存
 vocab_size = len( tokenizer )
 
 print( "vocab_size:", vocab_size )
@@ -282,9 +281,8 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
             beam_transition_score2.view(-1, beam, self.rank).transpose(1, 2))
         beam_transition_matrix = beam_transition_matrix.view(batch_size, -1, beam, beam) # bsz, seq_len, beam, beam
 
-        # フィルタリング用のパラメータ設定 (config等から取得できるよう適宜調整してください)
-        #top_k = 50  # 上位k個に絞る (0なら無効)
-        #top_p = 0.9 # 累積確率pまでに絞る (1.0なら無効)
+        #top_k = 50 
+        #top_p = 0.9
 
         traj_tokens = []
         step_probs = []
@@ -304,34 +302,21 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
             B, N, C, W = _score_matrix.shape
             flat_score = _score_matrix.permute(0, 1, 3, 2 ).reshape(-1, C)
 
-            # --- Top-K / Top-P Filtering 開始 (修正版) ---
             logits = flat_score / self.temp #B*W*N,C
 
-            # 1. まず Top-K で上位K個に絞る (0なら無効)
             if self.top_k > 0:
                 top_k_val = min(self.top_k, logits.size(-1)) # top_kが語彙数より大きくならないように調整
                 top_k_logits, top_k_indices = torch.topk(logits, top_k_val, dim=-1)
 
-                # Top-K用のマスクを作成
                 min_values = top_k_logits[:, -1].unsqueeze(-1)
                 logits = torch.where(logits < min_values, torch.full_like(logits, float('-inf')), logits)
 
-                # 以降の処理（Top-P）のために top_k_logits, top_k_indices を更新
-                # （注: top_pと組み合わせる場合、ここでのlogitsの更新より、
-                #  後続のtop_k_indicesを使ったmaskの方がロジックが整合しやすい）
 
-            # Top-Kの変数を再定義（top_pの処理で使うため）
-            # top_k > 0 の場合、top_kで絞った後の値を使う。0の場合は全範囲。
             top_k_logits, top_k_indices = logits, torch.arange(logits.size(-1), device=logits.device).expand(logits.size(0), -1)
-            # ↑ このアプローチはメモリを食うため、元の実装の通りtop_k_indicesでmaskする方が綺麗です。
-            # 以下、元のロジックを活かした修正版です。
-            # 2. Top-P (Nucleus) filtering
             if self.top_p < 1.0:
-                # Top-K/Allで絞ったテンソルでソート
                 sorted_logits, sorted_indices = torch.sort(top_k_logits, descending=True)
                 cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
 
-                # 除去対象のマスクを作成
                 sorted_indices_to_remove = cumulative_probs > self.top_p
                 sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
                 sorted_indices_to_remove[..., 0] = 0
@@ -342,7 +327,6 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
                 )
                 top_k_logits[indices_to_remove_k] = -float('Inf')
 
-            # 3. 全語彙の logits を一旦すべて -inf にして、生き残った top_k_logits だけを戻す
             new_logits = torch.full_like(logits, float('-inf'))
             new_logits.scatter_(dim=-1, index=top_k_indices, src=top_k_logits)
             logits = new_logits
@@ -363,7 +347,6 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
             
             traj_tokens.append( _index ) # S, B, N, W, cand
 
-        ## 2. サンプリングされた最後のインデックスを取得 (B, N, 1)
         B, N, C = score.shape
         flat_score = score.reshape(-1, C)
 
@@ -373,27 +356,24 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
         _index = _index_flat.view(B, N, self.cand)
         current_sampled_index = _index #(B, N, cand )
 
-        # beam から vocab_size に戻す。
         N_beam_targets = beam_targets[:,-1].unsqueeze( 1 ).expand( -1, N, -1 ) # B, N, W
         current_sampled_index = torch.gather( N_beam_targets, -1, current_sampled_index ) #B,N,cand
 
         finalized_tokens = torch.full( (seq_len,B,N), self.vocab_size , dtype=torch.long, device=device)
 
-        ## 3. 最初の要素として追加
         finalized_tokens[0] = current_sampled_index[:,:,0]
         traj_tokens = torch.stack( traj_tokens, dim = 0 )
 
-        # beam から vocab_size に戻す。
         N_beam_targets = beam_targets.unsqueeze( 2 ).unsqueeze(4).expand( -1, -1, N, -1, self.cand ) # B, seq_len, N, W
         N_beam_targets = N_beam_targets.permute( 1, 0, 2, 4, 3 ) #S,B,N,cand,W
         N_beam_targets1 = N_beam_targets[:-1]
         N_beam_targets2 = N_beam_targets[1:]
-        ##traj_tokens S,B,N,W,cand, traj_scores S,B,N,W
+        ##traj_tokens S,B,N,W,cand
         traj_tokens = torch.gather( N_beam_targets1, -1, traj_tokens.transpose(3,4))
         traj_tokens3 = torch.full( ( seq_len - 1, B, N, self.cand, self.vocab_size ), self.vocab_size, dtype=torch.long, device = beam_targets.device )
         traj_tokens3 = torch.scatter( traj_tokens3, -1, index = N_beam_targets2, src = traj_tokens)
 
-        # バックトレーシング
+        # backtrace
         if sampled_beam_idx is not None:
             flag = False
             beam_logits = []
@@ -419,25 +399,23 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
                 repeat_mask = ( finalized_tokens2 == cand_tokens  )  # S, B , N
                 not_permit_mask = (~torch.isin( finalized_tokens2, torch.tensor( permit_repeat, device=device))).to(torch.int ) 
                 repeat_sum = ( (repeat_mask).to(torch.int) * not_permit_mask ).sum(dim =0 )# B,N
-                if i == self.cand -1:#最終の時は、
-                    chg_flag = ~(stop_flag.to(torch.bool)) #最終の前までに stop が1になれば変えない。stop が0だったら変える。
+                if i == self.cand -1:
+                    chg_flag = ~(stop_flag.to(torch.bool)) 
                     if i == 0:
                         chg_flag = torch.ones( (B,N), dtype=torch.bool,device=device)
                 else:
-                    tmp_flag =  stop_flag + repeat_sum  # stopとrepeat両方が0の時 0
-                    chg_flag = ( tmp_flag == 0 )# stop と　repeat両方が0の時　chgは　true
+                    tmp_flag =  stop_flag + repeat_sum 
+                    chg_flag = ( tmp_flag == 0 )
                     stop_flag[ stop_flag == 1 ] = 1
                     stop_flag[ chg_flag ] = 1
-                finalized_tokens[i2] = torch.where(chg_flag,cand_tokens,finalized_tokens[i2])#(S),B,N True だったら変更、 False だったらそのまま。
+                finalized_tokens[i2] = torch.where(chg_flag,cand_tokens,finalized_tokens[i2])
                 chg_flag2 = chg_flag.unsqueeze(2).expand(-1,-1,W)
 
         finalized_tokens = torch.flip( finalized_tokens, dims= (0, ) )
         finalized_tokens = finalized_tokens.transpose( 0, 1 )#B,S,N
         
-        # vocab_size のfinalized_tokens から beam の sampled_beam_idx を作る
         N_beam_targets = beam_targets.unsqueeze( 2 ).expand( -1, -1, N, -1 ) # B, seq_len, N, W
         mask = N_beam_targets == finalized_tokens.unsqueeze(-1) #B,S,N,W
-        # 2. ビーム次元 (-1) で一致しているインデックスを取得
         sampled_beam_idx = torch.argmax(mask.to(torch.int32), dim=-1)
 
         if flag == True:
@@ -463,7 +441,7 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
 vocab_size = len( tokenizer )
 bsz = 4
 seq_len = 60
-cand = 4 # 繰り返しを抑制するために準備する候補の数
+cand = 4 # Number of candidates prepared to suppress repetition
 
 test = StochasticViterbiSampleSuppressRepeat( vocab_size, num_samples = 8, cand = cand )
 
