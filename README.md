@@ -453,7 +453,7 @@ sampled_log_probs = torch.gather( log_beam_probs, -2, sampled_beam_idx.unsqueeze
 print( sampled_log_probs.size() )
 
 
-log_beam_probs, sampled_beam_idx, finalized_tokens = test._compute_stochastic_viterbi_sample( emissions )
+log_beam_probs, sampled_beam_idx, finalized_tokens = test._compute_stochastic_viterbi_sample( emissions, sampled_beam_idx )
 
 print( log_beam_probs.size() )
 print( sampled_beam_idx.size() )
