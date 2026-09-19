@@ -197,6 +197,8 @@ tokenizer = BertTokenizer.from_pretrained(model_id)
 pad_token_id = tokenizer.pad_token_id
 cls_token_id = tokenizer.cls_token_id
 sep_token_id = tokenizer.sep_token_id
+# 2. 新しい特殊トークンを登録
+# 2. 新しい特殊トークンを登録
 special_tokens_dict = {'additional_special_tokens': ['[unused0]']}
 num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
 special_tokens_dict = {'additional_special_tokens': ['[unused1]']}
@@ -233,6 +235,7 @@ comma_token_id = tokenizer.encode( "," )[1]
 dbl_token_id = tokenizer.encode( '"' )[1]
 sgl_token_id = tokenizer.encode( "'" )[1]
 
+# 辞書サイズを保存
 vocab_size = len( tokenizer )
 
 print( "vocab_size:", vocab_size )
@@ -254,7 +257,7 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
         self.cand = cand
         self.num_samples = num_samples
 
-    def _compute_stochastic_viterbi_sample(self, emissions, sampled_beam_idx = None,  beam=None):
+    def _compute_stochastic_viterbi_sample(self, emissions, sampled_beam_idx = None, masks = None, beam=None):
 
         eps = 1e-8
         device = emissions.device
@@ -276,42 +279,95 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
             beam_transition_score2.view(-1, beam, self.rank).transpose(1, 2))
         beam_transition_matrix = beam_transition_matrix.view(batch_size, -1, beam, beam) # bsz, seq_len, beam, beam
 
-        #top_k = 50 
-        #top_p = 0.9
+        # フィルタリング用のパラメータ設定 (config等から取得できるよう適宜調整してください)
+        #top_k = 50  # 上位k個に絞る (0なら無効)
+        #top_p = 0.9 # 累積確率pまでに絞る (1.0なら無効)
+
+        if sampled_beam_idx is not None:
+            sampled_beam_idx_flag = True
+        else:
+            sampled_beam_idx_flag = False
+
+        # フィルタリング用のパラメータ設定 (config等から取得できるよう適宜調整してください)
+        #top_k = 50  # 上位k個に絞る (0なら無効)
+        #top_p = 0.9 # 累積確率pまでに絞る (1.0なら無効)
 
         traj_tokens = []
         step_probs = []
       
         score = beam_emission_scores[:,0][:,None,:].expand( -1, self.num_samples, -1)
+        dummy = torch.arange(beam, device=score.device).expand(*score.size()).contiguous()
+        dummy2 = dummy[:,:, :, None ].expand( -1, -1, -1, self.cand )
+        #print( "dummy.size():", dummy.size() )
+        #print( "dummy2.size():", dummy2.size() )
+        if masks is not None:
+            #print( "masks.size():", masks.size() )
+            masks = masks[:,:,None].expand(-1, -1, self.num_samples ).permute( 0,2,1)
+            #print( "masks.size():", masks.size() )
+        #print( "1 score:", score )
         B, N, C, W = score.unsqueeze(-1).expand(-1,-1,-1,beam).shape
+        #flat_score = score.unsqueeze(-1).expand(-1,-1,-1,beam).permute(0, 1, 3, 2).reshape(-1, C)
+        #logits = flat_score / self.temp # B*N*W*cand, C
+        #probs = F.softmax(logits, dim=-1)  # B*N*W*cand,C この softmax は、C についての softmax
+
+        #torch.manual_seed(42)
+        #_index_flat = torch.multinomial(probs, num_samples=self.cand, replacement=False)
+        #_, _index_flat = torch.topk( probs, self,cand, -1)
+
+        #score2 = torch.gather( probs, -1, _index_flat).view( B, N, W, self.cand)
+        #score2 = torch.gather( flat_score, -1, _index_flat).view( B, N, W, self.cand)
+        #score2 = torch.gather( flat_score / self.temp, -1, _index_flat).view( B, N, W, self.cand)
+        #log_probs_t0 = torch.log_softmax( score / self.temp, dim=-1)
         logits_t0 = score / self.temp
+        #score2 = score[:,:,:,None].expand(-1,-1,-1, self.cand)
         
         for i in range(1, seq_len):
+            #_score = score.unsqueeze(-1) + beam_transition_matrix[:, i-1,None,:,:].expand( -1, N,-1,-1) #B,N,C,W
+
             _score_matrix = score.unsqueeze(-1) + beam_transition_matrix[:,i-1,None,:,:,].expand( -1, N, -1, -1 )
             _score_matrix = _score_matrix + beam_emission_scores[:,i][:,None,None,:].expand(-1,N,C,-1)
 
+            # 【重要】強化学習用の遷移対数確率（次のBeam候補 dim=-1 に対する確率分布）
+            # 形状: (bsz, beam, beam)
+            #action_log_prob = torch.log_softmax(_score_matrix / self.temp, dim=-1)
+            ##action_log_prob = _score_matrix
+            ##action_log_prob = _score_matrix / self.temp
+            #step_log_probs.append(action_log_prob)
             step_probs.append( _score_matrix / self.temp )
             
-            _score, _index = _score_matrix.max( dim = 1 )
+            #_score, _index = _score_matrix.max( dim = 1 )
             
             B, N, C, W = _score_matrix.shape
             flat_score = _score_matrix.permute(0, 1, 3, 2 ).reshape(-1, C)
 
+            # --- Top-K / Top-P Filtering 開始 (修正版) ---
             logits = flat_score / self.temp #B*W*N,C
 
+            # 1. まず Top-K で上位K個に絞る (0なら無効)
             if self.top_k > 0:
-                top_k_val = min(self.top_k, logits.size(-1)) 
+                top_k_val = min(self.top_k, logits.size(-1)) # top_kが語彙数より大きくならないように調整
                 top_k_logits, top_k_indices = torch.topk(logits, top_k_val, dim=-1)
 
+                # Top-K用のマスクを作成
                 min_values = top_k_logits[:, -1].unsqueeze(-1)
                 logits = torch.where(logits < min_values, torch.full_like(logits, float('-inf')), logits)
 
+                # 以降の処理（Top-P）のために top_k_logits, top_k_indices を更新
+                # （注: top_pと組み合わせる場合、ここでのlogitsの更新より、
+                #  後続のtop_k_indicesを使ったmaskの方がロジックが整合しやすい）
 
+            # Top-Kの変数を再定義（top_pの処理で使うため）
+            # top_k > 0 の場合、top_kで絞った後の値を使う。0の場合は全範囲。
             top_k_logits, top_k_indices = logits, torch.arange(logits.size(-1), device=logits.device).expand(logits.size(0), -1)
+            # ↑ このアプローチはメモリを食うため、元の実装の通りtop_k_indicesでmaskする方が綺麗です。
+            # 以下、元のロジックを活かした修正版です。
+            # 2. Top-P (Nucleus) filtering
             if self.top_p < 1.0:
+                # Top-K/Allで絞ったテンソルでソート
                 sorted_logits, sorted_indices = torch.sort(top_k_logits, descending=True)
                 cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
 
+                # 除去対象のマスクを作成
                 sorted_indices_to_remove = cumulative_probs > self.top_p
                 sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
                 sorted_indices_to_remove[..., 0] = 0
@@ -322,60 +378,96 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
                 )
                 top_k_logits[indices_to_remove_k] = -float('Inf')
 
+            # 3. 全語彙の logits を一旦すべて -inf にして、生き残った top_k_logits だけを戻す
             new_logits = torch.full_like(logits, float('-inf'))
             new_logits.scatter_(dim=-1, index=top_k_indices, src=top_k_logits)
             logits = new_logits
 
             if torch.all(logits == float('inf')):
-                logits = torch.ones_like(logits) 
+                logits = torch.ones_like(logits)  # テンソル全体を1にする場合
             
-            probs = F.softmax(logits, dim=-1) 
+            probs = F.softmax(logits, dim=-1) # B*W*N,C この softmax は、C についての softmax
 
+            #torch.manual_seed(42)
             _index_flat = torch.multinomial(probs, num_samples=self.cand, replacement=False) #B*N*W,cand
+            #_index_flat = torch.topk( probs, self.cand, dim = -1 )
             _index_flat1 = _index_flat[:,:1]
 
+            #_score_flat = torch.gather( probs, -1, _index_flat1)
+            #_score_flat2 = torch.gather( probs, -1, _index_flat)
+            #_score_flat = torch.gather( flat_score / self.temp, -1, _index_flat1)
+            #_score_flat2 = torch.gather( flat_score / self.temp, -1, _index_flat)
             _score_flat = torch.gather( flat_score, -1, _index_flat1)
-            _index = _index_flat.view(B, N, W, self.cand) # B, N, W, cand
+            #_score_flat2 = torch.gather( flat_score, -1, _index_flat)
+            _index2 = _index_flat.view(B, N, W, self.cand) # B, N, W, cand
             _score = _score_flat.view(B, N, W) # B, N, W
+            #_score2 = _score_flat2.view( B, N, W, self.cand )
             
-            score = _score
-            
-            traj_tokens.append( _index ) # S, B, N, W, cand
+            #_score = _score + beam_emission_scores[:, i][:,None,:].expand(-1,N,-1)
 
+            if masks is not None:
+                #print( "masks[:,:,i:i+1].size():",masks[:,:,i:i+1].size())
+                #print( "_score.size():", _score.size() )
+                #print( "score.size():", score.size() )
+                score = torch.where(masks[:,:, i: i+1], _score, score)
+                #index = torch.where(masks[:, i: i+1], _index, dummy)
+                #print( "_index2.size():", _index2.size() )
+                index2 = torch.where(masks[:,:, i: i+1][:,:,:,None].expand( -1, -1, -1, self.cand ), _index2, dummy2 )
+            else:
+                score, index2 = _score, _index2
+            
+            
+            #score = _score
+            #_score2 = _score2 + beam_emission_scores[:,i][:,None,:,None].expand( -1, N, -1, self.cand )
+            #score2 = _score2
+            
+            traj_tokens.append( index2 ) # S, B, N, W, cand
+
+        ## 2. サンプリングされた最後のインデックスを取得 (B, N, 1)
+        #print( "_score:", _score )
         B, N, C = score.shape
         flat_score = score.reshape(-1, C)
 
         probs = F.softmax(flat_score / self.temp, dim=-1)
+        #torch.manual_seed(42)
+        #print( "probs:", probs )
         _index_flat = torch.multinomial(probs, num_samples=self.cand, replacement = False ) #B*N,cand
+        #_index_flat = torch.topk( probs, self.cand, -1 )
 
+        #_score_flat = torch.gather(probs, -1, _index_flat)
+        #_score_flat = torch.gather(flat_score, -1, _index_flat)
         _index = _index_flat.view(B, N, self.cand)
+        #_score = _score_flat.view(B, N, self.cand)
+        #_score = _score.unsqueeze(2).expand(-1,-1,W,-1)
         current_sampled_index = _index #(B, N, cand )
 
+        # beam から vocab_size に戻す。
         N_beam_targets = beam_targets[:,-1].unsqueeze( 1 ).expand( -1, N, -1 ) # B, N, W
         current_sampled_index = torch.gather( N_beam_targets, -1, current_sampled_index ) #B,N,cand
 
         finalized_tokens = torch.full( (seq_len,B,N), self.vocab_size , dtype=torch.long, device=device)
 
+        ## 3. 最初の要素として追加
         finalized_tokens[0] = current_sampled_index[:,:,0]
+        #traj_scores = torch.stack( traj_scores, dim = 0 )
         traj_tokens = torch.stack( traj_tokens, dim = 0 )
 
+        # beam から vocab_size に戻す。
         N_beam_targets = beam_targets.unsqueeze( 2 ).unsqueeze(4).expand( -1, -1, N, -1, self.cand ) # B, seq_len, N, W
         N_beam_targets = N_beam_targets.permute( 1, 0, 2, 4, 3 ) #S,B,N,cand,W
         N_beam_targets1 = N_beam_targets[:-1]
         N_beam_targets2 = N_beam_targets[1:]
-        ##traj_tokens S,B,N,W,cand
+        ##traj_tokens S,B,N,W,cand, traj_scores S,B,N,W
         traj_tokens = torch.gather( N_beam_targets1, -1, traj_tokens.transpose(3,4))
         traj_tokens3 = torch.full( ( seq_len - 1, B, N, self.cand, self.vocab_size ), self.vocab_size, dtype=torch.long, device = beam_targets.device )
         traj_tokens3 = torch.scatter( traj_tokens3, -1, index = N_beam_targets2, src = traj_tokens)
 
-        # backtrace
-        if sampled_beam_idx is not None:
-            flag = False
+        # バックトレーシング
+        if sampled_beam_idx_flag:
             beam_logits = []
-        else:
-            flag = True
+        #for i3, (idx_step, prob_step ) in enumerate( zip(torch.flip(traj_tokens3, dims=(0,)),torch.flip(traj_scores, dims=(0,)) ) ):
         for i3, (idx_step, step_prob ) in enumerate( zip(torch.flip(traj_tokens3, dims=(0,)), reversed( step_probs ))):
-            if sampled_beam_idx is not None:
+            if sampled_beam_idx_flag:
                 i4 = seq_len - i3 - 1
                 previous_beam_index = sampled_beam_idx[:,i4-1]
                 prob_from_prev = step_prob.gather(2, previous_beam_index[:, :, None, None].expand(-1, -1, 1,  beam))
@@ -385,6 +477,7 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
             previous_pointer = finalized_tokens[i3]
             stop_flag = torch.zeros( (B,N), dtype=torch.int,device=device)
             for i in range( self.cand ):
+                #cand_probs = prob_step[:,:,:,i]
                 idx = idx_step[:,:,i].new_empty((idx_step[:,:,i].size(0), idx_step[:,:,i].size(1), idx_step[:,:,i].size(2)+1))
                 idx[:,:,:-1] = idx_step[:,:,i]
                 idx[:,:,idx.size(2)-1] = self.vocab_size
@@ -394,26 +487,29 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
                 repeat_mask = ( finalized_tokens2 == cand_tokens  )  # S, B , N
                 not_permit_mask = (~torch.isin( finalized_tokens2, torch.tensor( permit_repeat, device=device))).to(torch.int ) 
                 repeat_sum = ( (repeat_mask).to(torch.int) * not_permit_mask ).sum(dim =0 )# B,N
-                if i == self.cand -1:
-                    chg_flag = ~(stop_flag.to(torch.bool)) 
+                if i == self.cand -1:#最終の時は、
+                    chg_flag = ~(stop_flag.to(torch.bool)) #最終の前までに stop が1になれば変えない。stop が0だったら変える。
                     if i == 0:
                         chg_flag = torch.ones( (B,N), dtype=torch.bool,device=device)
                 else:
-                    tmp_flag =  stop_flag + repeat_sum 
-                    chg_flag = ( tmp_flag == 0 )
+                    tmp_flag =  stop_flag + repeat_sum  # stopとrepeat両方が0の時 0
+                    chg_flag = ( tmp_flag == 0 )# stop と　repeat両方が0の時　chgは　true
                     stop_flag[ stop_flag == 1 ] = 1
                     stop_flag[ chg_flag ] = 1
-                finalized_tokens[i2] = torch.where(chg_flag,cand_tokens,finalized_tokens[i2])
+                finalized_tokens[i2] = torch.where(chg_flag,cand_tokens,finalized_tokens[i2])#(S),B,N True だったら変更、 False だったらそのまま。
                 chg_flag2 = chg_flag.unsqueeze(2).expand(-1,-1,W)
 
         finalized_tokens = torch.flip( finalized_tokens, dims= (0, ) )
         finalized_tokens = finalized_tokens.transpose( 0, 1 )#B,S,N
-        
-        N_beam_targets = beam_targets.unsqueeze( 2 ).expand( -1, -1, N, -1 ) # B, seq_len, N, W
-        mask = N_beam_targets == finalized_tokens.unsqueeze(-1) #B,S,N,W
-        sampled_beam_idx = torch.argmax(mask.to(torch.int32), dim=-1)
 
-        if flag == True:
+        if not sampled_beam_idx_flag:
+            
+            # vocab_size のfinalized_tokens から beam の sampled_beam_idx を作る
+            N_beam_targets = beam_targets.unsqueeze( 2 ).expand( -1, -1, N, -1 ) # B, seq_len, N, W
+            mask = N_beam_targets == finalized_tokens.unsqueeze(-1) #B,S,N,W
+            # 2. ビーム次元 (-1) で一致しているインデックスを取得
+            sampled_beam_idx = torch.argmax(mask.to(torch.int32), dim=-1)
+
             beam_logits = []
             for i3, step_prob in enumerate( reversed( step_probs )):
                 i4 = seq_len - i3 - 1
@@ -421,6 +517,7 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
                 prob_from_prev = step_prob.gather(2, previous_beam_index[:, :, None, None].expand(-1, -1, 1,  beam))
                 beam_logits.append( prob_from_prev.squeeze(2) ) # (S), B, W
         
+        #print( "log_beam_logits:", log_beam_logits )
         beam_logits.append( logits_t0 )
         beam_logits = torch.stack( beam_logits, dim = 0 )
         beam_logits = torch.flip( beam_logits, dims = (0, ) )
@@ -428,8 +525,9 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
         beam_probs = F.softmax( beam_logits, dim = 2 )
 
         log_beam_probs = torch.log( beam_probs + eps )
+    
         
-        return log_beam_probs, sampled_beam_idx, finalized_tokens
+        return beam_logits, log_beam_probs, sampled_beam_idx, finalized_tokens
 
 ```
 ```python
