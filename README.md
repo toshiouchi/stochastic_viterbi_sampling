@@ -213,6 +213,7 @@ test = tokenizer.decode( eos_token_id )
 print( test )
 a_token_id = tokenizer.encode( "a"  )[1]
 print( "a_token_id:", a_token_id )
+an_token_id = tokenizer.encode( “an” )[1]
 the_token_id = tokenizer.encode( "the" )[1]
 and_token_id = tokenizer.encode( "and" )[1]
 in_token_id = tokenizer.encode( "in" )[1]
@@ -260,7 +261,7 @@ class StochasticViterbiSampleSuppressRepeat(nn.Module):
 
         eps = 1e-8
         device = emissions.device
-        permit_repeat = [ pad_token_id, eos_token_id, cls_token_id, sep_token_id, a_token_id, the_token_id, period_token_id, \
+        permit_repeat = [ pad_token_id, eos_token_id, cls_token_id, sep_token_id, a_token_id, an_token_id, the_token_id, period_token_id, \
                          comma_token_id, and_token_id, in_token_id, we_token_id, i_token_id, he_token_id, she_token_id, \
                          it_token_id, they_token_id, dbl_token_id, sgl_token_id ]
 
