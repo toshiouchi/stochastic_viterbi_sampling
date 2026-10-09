@@ -213,7 +213,7 @@ test = tokenizer.decode( eos_token_id )
 print( test )
 a_token_id = tokenizer.encode( "a"  )[1]
 print( "a_token_id:", a_token_id )
-an_token_id = tokenizer.encode( “an” )[1]
+an_token_id = tokenizer.encode( "an" )[1]
 the_token_id = tokenizer.encode( "the" )[1]
 and_token_id = tokenizer.encode( "and" )[1]
 in_token_id = tokenizer.encode( "in" )[1]
