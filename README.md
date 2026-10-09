@@ -595,3 +595,190 @@ refe: [CLS] a man is sitting on a park bench looking up at the sky. [SEP]
 
 It is evident that repetition is reliably suppressed.
 
+
+## # Viterbi Algorithm with Repeat Penalty
+
+In the Viterbi algorithm, the sum of emission probabilities and transition probabilities serves as the base logits. I devised an algorithm that applies a `repeat_penalty` to these logits when the same token appears consecutively in the sequence.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import BertTokenizer
+
+model_id = "google-bert/bert-large-uncased"
+tokenizer = BertTokenizer.from_pretrained(model_id)
+pad_token_id = tokenizer.pad_token_id
+cls_token_id = tokenizer.cls_token_id
+sep_token_id = tokenizer.sep_token_id
+
+
+special_tokens_dict = {'additional_special_tokens': ['[unused0]']}
+num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
+special_tokens_dict = {'additional_special_tokens': ['[unused1]']}
+num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
+sos_token_id = tokenizer.encode( "[unused0]" )[1]
+print( "sos_token_id:", sos_token_id )
+eos_token_id = tokenizer.encode( "[unused1]" )[1]
+print( "eos_token_id:", eos_token_id )
+test = tokenizer.decode( sos_token_id )
+print( test )
+test = tokenizer.decode( eos_token_id )
+print( test )
+a_token_id = tokenizer.encode( "a"  )[1]
+print( "a_token_id:", a_token_id )
+an_token_id = tokenizer.encode( "an" )[1]
+the_token_id = tokenizer.encode( "the" )[1]
+and_token_id = tokenizer.encode( "and" )[1]
+in_token_id = tokenizer.encode( "in" )[1]
+of_token_id = tokenizer.encode( "of" )[1]
+on_token_id = tokenizer.encode( "on" )[1]
+at_token_id = tokenizer.encode( "at" )[1]
+to_token_id = tokenizer.encode( "to" )[1]
+for_token_id = tokenizer.encode( "for" )[1]
+from_token_id = tokenizer.encode( "from" )[1]
+with_token_id = tokenizer.encode( "with" )[1]
+by_token_id = tokenizer.encode( "by" )[1]
+we_token_id = tokenizer.encode( "we" )[1]
+i_token_id = tokenizer.encode( "i" )[1]
+he_token_id = tokenizer.encode( "he" )[1]
+she_token_id = tokenizer.encode( "she" )[1]
+it_token_id = tokenizer.encode( "it" )[1]
+they_token_id = tokenizer.encode( "they" )[1]
+period_token_id = tokenizer.encode( "." )[1]
+comma_token_id = tokenizer.encode( "," )[1]
+dbl_token_id = tokenizer.encode( '"' )[1]
+sgl_token_id = tokenizer.encode( "'" )[1]
+
+vocab_size = len( tokenizer )
+
+print( "vocab_size:", vocab_size )
+
+class StochasticViterbiSampleRepeatPenalty(nn.Module):
+    def __init__(self, num_embedding, low_rank=32, beam_size=256, temp = 1.0):
+        super().__init__()
+
+        self.E1 = nn.Embedding(num_embedding, low_rank)
+        self.E2 = nn.Embedding(num_embedding, low_rank)
+
+        self.rank = low_rank
+        self.beam = beam_size
+        self.temp = temp
+
+    def _computer_viterbi_algorithm_repeat_penalty(self, emissions, top_indices = None, masks=None, repeat_penalty = 0.8, beam = None ):
+
+        beam = beam if beam is not None else self.beam
+        batch_size, seq_len = emissions.size()[:2]
+        B = batch_size
+        device = emissions.device
+
+        permit_repeat = [ pad_token_id, eos_token_id, cls_token_id, sep_token_id, a_token_id, an_token_id, the_token_id, period_token_id, \
+                         comma_token_id, and_token_id, in_token_id, we_token_id, i_token_id, he_token_id, she_token_id, \
+                         it_token_id, they_token_id, dbl_token_id, sgl_token_id ]
+        permit_repeat = torch.tensor( permit_repeat ).to(device)
+        
+        if top_indices == None:
+            beam_emission_scores, beam_targets = torch.topk( emissions, beam, -1)
+        else:
+            beam_emission_scores = torch.gather( emissions, -1, top_indices )
+            beam_targets = top_indices
+        
+        beam_transition_score1 = self.E1(beam_targets[:, :-1])  # B x (T-1) x K x D
+        beam_transition_score2 = self.E2(beam_targets[:, 1:])   # B x (T-1) x K x D
+        beam_transition_matrix = torch.bmm(
+            beam_transition_score1.view(-1, self.beam, self.rank),
+            beam_transition_score2.view(-1, self.beam, self.rank).transpose(1, 2))
+        beam_transition_matrix = beam_transition_matrix.view(batch_size, -1, beam, beam) # bsz, seq_len, beam, beam
+
+        traj_tokens = []
+        step_probs = []
+        finalized_tokens = []
+        
+        # compute the normalizer in the log-space
+        score = beam_emission_scores[:, 0]  # B x K
+        dummy = torch.arange(beam, device=score.device).expand(*score.size()).contiguous()
+        logits_t0 = score / self.temp
+        
+        for i in range(1, seq_len):
+            _score_matrix = score.unsqueeze(-1) + beam_transition_matrix[:,i-1,:,:,].expand( -1, -1, -1 )
+            _score_matrix = _score_matrix + beam_emission_scores[:,i][:,None,:].expand(-1,beam,-1)
+    
+            # -----------------------------------------------------------------
+            # ★ repeat_penalty
+            # -----------------------------------------------------------------
+            if repeat_penalty > 0.0:
+                # from_beam の各インデックスが保持している「実際のトークンID」: (bsz, from_beam, 1)
+                
+                from_tokens = [ beam_targets[:, i2][:, :, None] for i2 in range( i ) ]
+                from_tokens = torch.stack( from_tokens, dim = 0 )
+                to_tokens = beam_targets[:, i][:, None, :]
+
+                is_permitted = torch.isin(to_tokens, permit_repeat)
+                
+                repeat_mask1 = [] 
+                repeat_mask2 = []
+                for i2 in range( i ):
+                    mask1 = ( from_tokens[i-1] == from_tokens[i2] )
+                    mask2 = ( from_tokens[i2] == to_tokens )
+                    
+                    mask2 = mask2 & ~is_permitted
+                    
+                    repeat_mask1.append( mask1 )
+                    repeat_mask2.append( mask2 )
+                
+                repeat_mask1 = torch.stack( repeat_mask1, dim = 0 )
+                repeat_mask2 = torch.stack( repeat_mask2, dim = 0 )
+                #print( "repeat_mask2.size():", repeat_mask2.size() )
+
+                _search_score_matrix = _score_matrix
+                for i2 in range( i ):
+                    _search_score_matrix = _search_score_matrix * ( torch.ones_like( _score_matrix ) - repeat_mask1[i2].float() * repeat_mask2[i2].float() * repeat_penalty )
+                
+            else:
+                _search_score_matrix = _score_matrix
+            step_probs.append( _search_score_matrix / self.temp )
+            
+            _score, _index = _search_score_matrix.max(dim=1) # bsz, beam
+            
+            if masks is not None:
+                score = torch.where(masks[:, i: i+1], _score, score)
+                index = torch.where(masks[:, i: i+1], _index, dummy)
+            else:
+                score, index = _score, _index
+            
+            traj_tokens.append(index) # S, B, W
+    
+        _, _index = torch.max( score, dim = 1 )
+        current_sampled_index = _index #(B )
+    
+    
+        finalized_tokens.append( current_sampled_index.unsqueeze(-1) ) # (S), B
+    
+        for idx in reversed(traj_tokens):
+            previous_index = finalized_tokens[-1]
+            finalized_tokens.append(idx.gather(1, previous_index))
+        
+        finalized_tokens.reverse()
+        finalized_tokens = torch.cat(finalized_tokens, 1)
+        finalized_tokens = beam_targets.gather(2, finalized_tokens[:, :, None])[:, :, 0]
+       
+        return finalized_tokens
+```
+
+```python
+vocab_size = len( tokenizer )
+bsz = 4
+seq_len = 60
+
+test = StochasticViterbiSampleRepeatPenalty( vocab_size )
+
+emissions = torch.randn( ( bsz, seq_len, vocab_size ) )
+
+finalized_tokens = test._computer_viterbi_algorithm_repeat_penalty( emissions )
+
+print( finalized_tokens.size() 
+```
+
+```python
+torch.Size([4, 60])
+```
