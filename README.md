@@ -596,7 +596,7 @@ refe: [CLS] a man is sitting on a park bench looking up at the sky. [SEP]
 It is evident that repetition is reliably suppressed.
 
 
-## # Viterbi Algorithm with Repeat Penalty
+## Viterbi Algorithm with Repeat Penalty
 
 In the Viterbi algorithm, the sum of emission probabilities and transition probabilities serves as the base logits. I devised an algorithm that applies a `repeat_penalty` to these logits when the same token appears consecutively in the sequence.
 
