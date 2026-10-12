@@ -600,8 +600,7 @@ It is evident that repetition is reliably suppressed.
 
 In the Viterbi algorithm, the sum of emission probabilities and transition probabilities serves as the base logits. I devised an algorithm that applies a `repeat_penalty` to these logits when the same token appears consecutively in the sequence.
 
-```python
-import torch
+```pythonimport torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BertTokenizer
@@ -704,23 +703,31 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
             _score_matrix = _score_matrix + beam_emission_scores[:,i][:,None,:].expand(-1,beam,-1)
     
             # -----------------------------------------------------------------
-            # ★ repeat_penalty
+            # ★ リピートペナルティの動的適用
             # -----------------------------------------------------------------
             if repeat_penalty > 0.0:
                 # from_beam の各インデックスが保持している「実際のトークンID」: (bsz, from_beam, 1)
-                
-                from_tokens = [ beam_targets[:, i2][:, :, None] for i2 in range( i ) ]
-                from_tokens = torch.stack( from_tokens, dim = 0 )
+
+                from_tokens = beam_targets[:, i -1 ][:, :, None]
+                middle_tokens1 = [ beam_targets[:, i2][:, None,:] for i2 in range( i ) ]
+                middle_tokens1 = torch.stack( middle_tokens1, dim = 0 )
+                middle_tokens2 = [ beam_targets[:, i2][:, :,None] for i2 in range( i ) ]
+                middle_tokens2 = torch.stack( middle_tokens2, dim = 0 )
+                # to_beam の各インデックスが目指している「実際のトークンID」: (bsz, 1, to_beam)
                 to_tokens = beam_targets[:, i][:, None, :]
 
+                # ★ 3重ループの代わり：ループの外で1回だけ許可トークン判定（形状: bsz, 1, to_beam）
                 is_permitted = torch.isin(to_tokens, permit_repeat)
                 
+                # 同じトークンに遷移しようとしている箇所のマスク (bsz, from_beam, to_beam)
+                # 例: from_tokens が単語「5」、to_tokens も単語「5」なら True
                 repeat_mask1 = [] 
                 repeat_mask2 = []
                 for i2 in range( i ):
-                    mask1 = ( from_tokens[i-1] == from_tokens[i2] )
-                    mask2 = ( from_tokens[i2] == to_tokens )
+                    mask1 = ( from_tokens == middle_tokens1[i2] )
+                    mask2 = ( middle_tokens2[i2] == to_tokens )
                     
+                    # ★ ここでベクトル化したマスクを適用（ビット演算の AND NOT ）
                     mask2 = mask2 & ~is_permitted
                     
                     repeat_mask1.append( mask1 )
@@ -738,6 +745,7 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
                 _search_score_matrix = _score_matrix
             step_probs.append( _search_score_matrix / self.temp )
             
+            # 通常のビタビ処理（ペナルティ適用後のスコア行列から MAX を取る）
             _score, _index = _search_score_matrix.max(dim=1) # bsz, beam
             
             if masks is not None:
@@ -752,6 +760,7 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
         current_sampled_index = _index #(B )
     
     
+        ## 3. 最初の要素として追加
         finalized_tokens.append( current_sampled_index.unsqueeze(-1) ) # (S), B
     
         for idx in reversed(traj_tokens):
@@ -763,6 +772,7 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
         finalized_tokens = beam_targets.gather(2, finalized_tokens[:, :, None])[:, :, 0]
        
         return finalized_tokens
+
 ```
 
 ```python
