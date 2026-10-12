@@ -600,7 +600,8 @@ It is evident that repetition is reliably suppressed.
 
 In the Viterbi algorithm, the sum of emission probabilities and transition probabilities serves as the base logits. I devised an algorithm that applies a `repeat_penalty` to these logits when the same token appears consecutively in the sequence.
 
-```pythonimport torch
+```python
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BertTokenizer
