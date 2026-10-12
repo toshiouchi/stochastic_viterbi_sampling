@@ -776,7 +776,7 @@ emissions = torch.randn( ( bsz, seq_len, vocab_size ) )
 
 finalized_tokens = test._computer_viterbi_algorithm_repeat_penalty( emissions )
 
-print( finalized_tokens.size() 
+print( finalized_tokens.size() )
 ```
 
 ```python
