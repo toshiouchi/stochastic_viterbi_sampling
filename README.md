@@ -797,7 +797,6 @@ torch.Size([4, 60])
 Fast implement
 
 ```python
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BertTokenizer
@@ -900,49 +899,46 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
             _score_matrix = _score_matrix + beam_emission_scores[:,i][:,None,:].expand(-1,beam,-1)
     
             # -----------------------------------------------------------------
-            # ★ repeat_penalty
+            # ★ リピートペナルティの動的適用
             # -----------------------------------------------------------------
+ 
             if repeat_penalty > 0.0:
-                # 1. 過去(0 から i-1 まで)のすべてのトークンIDを一括取得
-                # 形状: (B, i, K) -> (i, B, K, 1)
-                past_tokens = beam_targets[:, :i].permute(1, 0, 2).unsqueeze(-1)
+                #  (B, i, K) -> (i, B, K, 1)
+                past_tokens1= beam_targets[:, :i].permute(1, 0, 2).unsqueeze(-1)
+                #  (B, i, K) -> (i, B, 1, K)
+                past_tokens2= beam_targets[:, :i].permute(1, 0, 2).unsqueeze(-2)
+            
+                # (1, B, K, 1)
+                last_token = past_tokens1[-1:]
                 
-                # 直前のトークンID。形状: (1, B, K, 1)
-                last_token = past_tokens[-1:]
-                
-                # 2. 現在（to_beam）の候補トークンID。形状: (1, B, 1, K)
+                # (1, B, 1, K)
                 to_tokens = beam_targets[:, i].unsqueeze(0).unsqueeze(2)
                 
-                # 3. 許可トークン判定を一括で行う。形状: (1, B, 1, K)
+                # (1, B, 1, K)
                 is_permitted = torch.isin(to_tokens, permit_repeat)
                 
-                # 4. ブロードキャストを利用して、すべての過去ステップ(i2)の mask1 と mask2 を一括計算
-                # mask1: 直前(i-1)のトークンと、過去(i2)のトークンが一致しているか
-                # 形状: (i, B, K, 1)
-                mask1 = (last_token == past_tokens)
+                #  (i, B, K, 1)
+                mask1 = (last_token == past_tokens1)
                 
-                # mask2: 過去(i2)のトークと、次に遷移しようとしているトークン(to_tokens)が一致しているか
-                # 形状: (i, B, K, K)
-                mask2 = (past_tokens == to_tokens)
+                #  (i, B, 1, K)
+                mask2 = (past_tokens2 == to_tokens)
                 
-                # 許可トークンはペナルティ対象から除外 (AND NOT)
                 mask2 = mask2 & ~is_permitted
                 
-                # 5. 各過去ステップにおけるペナルティ倍率の行列を計算
                 # (mask1.float() * mask2.float() * repeat_penalty) の形状は (i, B, K, K)
                 # 1.0 から引くことで、ペナルティがかかる場所だけ (1.0 - repeat_penalty) になります
                 penalty_factors = 1.0 - (mask1.float() * mask2.float() * repeat_penalty)
                 
-                # 6. すべての過去ステップ分(i次元)を掛け合わせる（累積積）
                 # 形状: (B, K, K)
                 total_penalty_matrix = torch.prod(penalty_factors, dim=0)
                 
-                # スコア行列に一括適用
                 _search_score_matrix = _score_matrix * total_penalty_matrix
             else:
                 _search_score_matrix = _score_matrix
+            
             step_probs.append( _search_score_matrix / self.temp )
             
+            # 通常のビタビ処理（ペナルティ適用後のスコア行列から MAX を取る）
             _score, _index = _search_score_matrix.max(dim=1) # bsz, beam
             
             if masks is not None:
@@ -968,4 +964,5 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
         finalized_tokens = beam_targets.gather(2, finalized_tokens[:, :, None])[:, :, 0]
        
         return finalized_tokens
+
 ```
