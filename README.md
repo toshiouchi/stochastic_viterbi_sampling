@@ -904,32 +904,29 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
  
             if repeat_penalty > 0.0:
                 #  (B, i, K) -> (i, B, K, 1)
-                past_tokens1= beam_targets[:, :i].permute(1, 0, 2).unsqueeze(-1)
-                #  (B, i, K) -> (i, B, 1, K)
-                past_tokens2= beam_targets[:, :i].permute(1, 0, 2).unsqueeze(-2)
+                past_tokens= beam_targets[:, :i].permute(1, 0, 2).unsqueeze(-1)
             
-                # (1, B, K, 1)
-                last_token = past_tokens1[-1:]
+                #  (1, B, K, 1)
+                last_token = past_tokens[-1:]
                 
-                # (1, B, 1, K)
+                #  (1, B, 1, K)
                 to_tokens = beam_targets[:, i].unsqueeze(0).unsqueeze(2)
                 
-                # (1, B, 1, K)
+                #  (1, B, 1, K)
                 is_permitted = torch.isin(to_tokens, permit_repeat)
                 
                 #  (i, B, K, 1)
-                mask1 = (last_token == past_tokens1)
+                mask1 = (last_token == past_tokens)
                 
                 #  (i, B, 1, K)
-                mask2 = (past_tokens2 == to_tokens)
+                mask2 = (past_tokens.transpose(2,3) == to_tokens)
                 
                 mask2 = mask2 & ~is_permitted
                 
-                # (mask1.float() * mask2.float() * repeat_penalty) の形状は (i, B, K, K)
-                # 1.0 から引くことで、ペナルティがかかる場所だけ (1.0 - repeat_penalty) になります
+                # (mask1.float() * mask2.float() * repeat_penalty)  (i, B, 1, K)
                 penalty_factors = 1.0 - (mask1.float() * mask2.float() * repeat_penalty)
                 
-                # 形状: (B, K, K)
+                #  (B, K, K)
                 total_penalty_matrix = torch.prod(penalty_factors, dim=0)
                 
                 _search_score_matrix = _score_matrix * total_penalty_matrix
