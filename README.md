@@ -782,3 +782,179 @@ print( finalized_tokens.size() )
 ```python
 torch.Size([4, 60])
 ```
+
+Fast implement
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import BertTokenizer
+
+model_id = "google-bert/bert-large-uncased"
+tokenizer = BertTokenizer.from_pretrained(model_id)
+pad_token_id = tokenizer.pad_token_id
+cls_token_id = tokenizer.cls_token_id
+sep_token_id = tokenizer.sep_token_id
+
+
+special_tokens_dict = {'additional_special_tokens': ['[unused0]']}
+num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
+special_tokens_dict = {'additional_special_tokens': ['[unused1]']}
+num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
+sos_token_id = tokenizer.encode( "[unused0]" )[1]
+print( "sos_token_id:", sos_token_id )
+eos_token_id = tokenizer.encode( "[unused1]" )[1]
+print( "eos_token_id:", eos_token_id )
+test = tokenizer.decode( sos_token_id )
+print( test )
+test = tokenizer.decode( eos_token_id )
+print( test )
+a_token_id = tokenizer.encode( "a"  )[1]
+print( "a_token_id:", a_token_id )
+an_token_id = tokenizer.encode( "an" )[1]
+the_token_id = tokenizer.encode( "the" )[1]
+and_token_id = tokenizer.encode( "and" )[1]
+in_token_id = tokenizer.encode( "in" )[1]
+of_token_id = tokenizer.encode( "of" )[1]
+on_token_id = tokenizer.encode( "on" )[1]
+at_token_id = tokenizer.encode( "at" )[1]
+to_token_id = tokenizer.encode( "to" )[1]
+for_token_id = tokenizer.encode( "for" )[1]
+from_token_id = tokenizer.encode( "from" )[1]
+with_token_id = tokenizer.encode( "with" )[1]
+by_token_id = tokenizer.encode( "by" )[1]
+we_token_id = tokenizer.encode( "we" )[1]
+i_token_id = tokenizer.encode( "i" )[1]
+he_token_id = tokenizer.encode( "he" )[1]
+she_token_id = tokenizer.encode( "she" )[1]
+it_token_id = tokenizer.encode( "it" )[1]
+they_token_id = tokenizer.encode( "they" )[1]
+period_token_id = tokenizer.encode( "." )[1]
+comma_token_id = tokenizer.encode( "," )[1]
+dbl_token_id = tokenizer.encode( '"' )[1]
+sgl_token_id = tokenizer.encode( "'" )[1]
+
+vocab_size = len( tokenizer )
+
+print( "vocab_size:", vocab_size )
+
+class StochasticViterbiSampleRepeatPenalty(nn.Module):
+    def __init__(self, num_embedding, low_rank=32, beam_size=256, temp = 1.0):
+        super().__init__()
+
+        self.E1 = nn.Embedding(num_embedding, low_rank)
+        self.E2 = nn.Embedding(num_embedding, low_rank)
+
+        self.rank = low_rank
+        self.beam = beam_size
+        self.temp = temp
+
+    def _computer_viterbi_algorithm_repeat_penalty(self, emissions, top_indices = None, masks=None, repeat_penalty = 0.8, beam = None ):
+
+        beam = beam if beam is not None else self.beam
+        batch_size, seq_len = emissions.size()[:2]
+        B = batch_size
+        device = emissions.device
+
+        permit_repeat = [ pad_token_id, eos_token_id, cls_token_id, sep_token_id, a_token_id, an_token_id, the_token_id, period_token_id, \
+                         comma_token_id, and_token_id, in_token_id, we_token_id, i_token_id, he_token_id, she_token_id, \
+                         it_token_id, they_token_id, dbl_token_id, sgl_token_id ]
+        permit_repeat = torch.tensor( permit_repeat ).to(device)
+        
+        if top_indices == None:
+            beam_emission_scores, beam_targets = torch.topk( emissions, beam, -1)
+        else:
+            beam_emission_scores = torch.gather( emissions, -1, top_indices )
+            beam_targets = top_indices
+        
+        beam_transition_score1 = self.E1(beam_targets[:, :-1])  # B x (T-1) x K x D
+        beam_transition_score2 = self.E2(beam_targets[:, 1:])   # B x (T-1) x K x D
+        beam_transition_matrix = torch.bmm(
+            beam_transition_score1.view(-1, self.beam, self.rank),
+            beam_transition_score2.view(-1, self.beam, self.rank).transpose(1, 2))
+        beam_transition_matrix = beam_transition_matrix.view(batch_size, -1, beam, beam) # bsz, seq_len, beam, beam
+
+        traj_tokens = []
+        step_probs = []
+        finalized_tokens = []
+        
+        # compute the normalizer in the log-space
+        score = beam_emission_scores[:, 0]  # B x K
+        dummy = torch.arange(beam, device=score.device).expand(*score.size()).contiguous()
+        logits_t0 = score / self.temp
+        
+        for i in range(1, seq_len):
+            _score_matrix = score.unsqueeze(-1) + beam_transition_matrix[:,i-1,:,:,].expand( -1, -1, -1 )
+            _score_matrix = _score_matrix + beam_emission_scores[:,i][:,None,:].expand(-1,beam,-1)
+    
+            # -----------------------------------------------------------------
+            # ★ repeat_penalty
+            # -----------------------------------------------------------------
+            if repeat_penalty > 0.0:
+                # 1. 過去(0 から i-1 まで)のすべてのトークンIDを一括取得
+                # 形状: (B, i, K) -> (i, B, K, 1)
+                past_tokens = beam_targets[:, :i].permute(1, 0, 2).unsqueeze(-1)
+                
+                # 直前のトークンID。形状: (1, B, K, 1)
+                last_token = past_tokens[-1:]
+                
+                # 2. 現在（to_beam）の候補トークンID。形状: (1, B, 1, K)
+                to_tokens = beam_targets[:, i].unsqueeze(0).unsqueeze(2)
+                
+                # 3. 許可トークン判定を一括で行う。形状: (1, B, 1, K)
+                is_permitted = torch.isin(to_tokens, permit_repeat)
+                
+                # 4. ブロードキャストを利用して、すべての過去ステップ(i2)の mask1 と mask2 を一括計算
+                # mask1: 直前(i-1)のトークンと、過去(i2)のトークンが一致しているか
+                # 形状: (i, B, K, 1)
+                mask1 = (last_token == past_tokens)
+                
+                # mask2: 過去(i2)のトークと、次に遷移しようとしているトークン(to_tokens)が一致しているか
+                # 形状: (i, B, K, K)
+                mask2 = (past_tokens == to_tokens)
+                
+                # 許可トークンはペナルティ対象から除外 (AND NOT)
+                mask2 = mask2 & ~is_permitted
+                
+                # 5. 各過去ステップにおけるペナルティ倍率の行列を計算
+                # (mask1.float() * mask2.float() * repeat_penalty) の形状は (i, B, K, K)
+                # 1.0 から引くことで、ペナルティがかかる場所だけ (1.0 - repeat_penalty) になります
+                penalty_factors = 1.0 - (mask1.float() * mask2.float() * repeat_penalty)
+                
+                # 6. すべての過去ステップ分(i次元)を掛け合わせる（累積積）
+                # 形状: (B, K, K)
+                total_penalty_matrix = torch.prod(penalty_factors, dim=0)
+                
+                # スコア行列に一括適用
+                _search_score_matrix = _score_matrix * total_penalty_matrix
+            else:
+                _search_score_matrix = _score_matrix
+            step_probs.append( _search_score_matrix / self.temp )
+            
+            _score, _index = _search_score_matrix.max(dim=1) # bsz, beam
+            
+            if masks is not None:
+                score = torch.where(masks[:, i: i+1], _score, score)
+                index = torch.where(masks[:, i: i+1], _index, dummy)
+            else:
+                score, index = _score, _index
+            
+            traj_tokens.append(index) # S, B, W
+    
+        _, _index = torch.max( score, dim = 1 )
+        current_sampled_index = _index #(B )
+    
+    
+        finalized_tokens.append( current_sampled_index.unsqueeze(-1) ) # (S), B
+    
+        for idx in reversed(traj_tokens):
+            previous_index = finalized_tokens[-1]
+            finalized_tokens.append(idx.gather(1, previous_index))
+        
+        finalized_tokens.reverse()
+        finalized_tokens = torch.cat(finalized_tokens, 1)
+        finalized_tokens = beam_targets.gather(2, finalized_tokens[:, :, None])[:, :, 0]
+       
+        return finalized_tokens
+```
