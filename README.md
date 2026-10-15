@@ -918,10 +918,8 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
                 #  (i, B, K, 1)
                 mask1 = (last_token == past_tokens)
                 
-                #  (i, B, 1, K)
-                mask2 = (past_tokens.transpose(2,3) == to_tokens)
-                
-                mask2 = mask2 & ~is_permitted
+                # ( 1, B, 1, K )
+                mask2 = to_tokens & ~is_permitted
                 
                 # (mask1.float() * mask2.float() * repeat_penalty)  (i, B, 1, K)
                 penalty_factors = 1.0 - (mask1.float() * mask2.float() * repeat_penalty)
