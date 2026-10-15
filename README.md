@@ -704,46 +704,32 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
             _score_matrix = _score_matrix + beam_emission_scores[:,i][:,None,:].expand(-1,beam,-1)
     
             # -----------------------------------------------------------------
-            # ★ リピートペナルティの動的適用
+            # repeat penalty
             # -----------------------------------------------------------------
             if repeat_penalty > 0.0:
-                # from_beam の各インデックスが保持している「実際のトークンID」: (bsz, from_beam, 1)
 
                 from_tokens = beam_targets[:, i -1 ][:, :, None]
-                middle_tokens1 = [ beam_targets[:, i2][:, None,:] for i2 in range( i ) ]
-                middle_tokens1 = torch.stack( middle_tokens1, dim = 0 )
-                middle_tokens2 = [ beam_targets[:, i2][:, :,None] for i2 in range( i ) ]
-                middle_tokens2 = torch.stack( middle_tokens2, dim = 0 )
-                # to_beam の各インデックスが目指している「実際のトークンID」: (bsz, 1, to_beam)
+                past_tokens = [ beam_targets[:, i2][:, None,:] for i2 in range( i ) ] 
+                past_tokens = torch.stack( past_tokens, dim = 0 ) # Seq, bsz, 1, beam
                 to_tokens = beam_targets[:, i][:, None, :]
 
-                # ★ 3重ループの代わり：ループの外で1回だけ許可トークン判定（形状: bsz, 1, to_beam）
-                is_permitted = torch.isin(to_tokens, permit_repeat)
-                
-                # 同じトークンに遷移しようとしている箇所のマスク (bsz, from_beam, to_beam)
-                # 例: from_tokens が単語「5」、to_tokens も単語「5」なら True
-                repeat_mask1 = [] 
-                repeat_mask2 = []
+                repeat_mask = [] 
+                to_mask = to_tokens & ~is_permitted # bsz, 1, beam
                 for i2 in range( i ):
-                    mask1 = ( from_tokens == middle_tokens1[i2] )
-                    mask2 = ( middle_tokens2[i2] == to_tokens )
+                    mask = ( from_tokens == past_tokens[i2] ) # bsz, beam, beam
+                    #mask2 = ( middle_tokens2[i2] == to_tokens ) # bsz, beam, beam
                     
-                    # ★ ここでベクトル化したマスクを適用（ビット演算の AND NOT ）
-                    mask2 = mask2 & ~is_permitted
-                    
-                    repeat_mask1.append( mask1 )
-                    repeat_mask2.append( mask2 )
+                    repeat_mask.append( mask )
                 
-                repeat_mask1 = torch.stack( repeat_mask1, dim = 0 )
-                repeat_mask2 = torch.stack( repeat_mask2, dim = 0 )
-                #print( "repeat_mask2.size():", repeat_mask2.size() )
+                repeat_mask = torch.stack( repeat_mask, dim = 0 ) # Seq, bsz, beam, beam
 
                 _search_score_matrix = _score_matrix
                 for i2 in range( i ):
-                    _search_score_matrix = _search_score_matrix * ( torch.ones_like( _score_matrix ) - repeat_mask1[i2].float() * repeat_mask2[i2].float() * repeat_penalty )
+                    _search_score_matrix = _search_score_matrix * ( torch.ones_like( _score_matrix ) - repeat_mask[i2].float() * to_mask.float() * repeat_penalty )
                 
             else:
                 _search_score_matrix = _score_matrix
+
             step_probs.append( _search_score_matrix / self.temp )
             
             # 通常のビタビ処理（ペナルティ適用後のスコア行列から MAX を取る）
