@@ -714,22 +714,22 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
                 is_permitted = torch.isin(to_tokens, permit_repeat)
                 
                 repeat_mask1 = [] 
-                repeat_mask2 = []
+                #repeat_mask2 = []
                 for i2 in range( i ):
-                    mask1 = ( from_tokens[i2] == from_tokens[i-1] )
-                    mask2 = ( from_tokens[i2] == to_tokens )
-                    
-                    mask2 = mask2 & ~is_permitted
-                    
+                    mask1 = ( from_tokens[i-1] == from_tokens[i2] )
+                  
                     repeat_mask1.append( mask1 )
-                    repeat_mask2.append( mask2 )
+
+                mask2 = ( from_tokens[i-1] == to_tokens )
+                repeat_mask2 = mask2 & ~is_permitted
                 
                 repeat_mask1 = torch.stack( repeat_mask1, dim = 0 )
-                repeat_mask2 = torch.stack( repeat_mask2, dim = 0 )
+                #repeat_mask2 = torch.stack( repeat_mask2, dim = 0 )
 
                 _search_score_matrix = _score_matrix
                 for i2 in range( i ):
-                    _search_score_matrix = _search_score_matrix * ( torch.ones_like( _score_matrix ) - repeat_mask1[i2].float() * repeat_mask2[i2].float() * repeat_penalty )
+                    _search_score_matrix = _search_score_matrix * ( torch.ones_like( _score_matrix ) - repeat_mask1[i2].float() * repeat_mask2.float() * repeat_penalty )
+
                 
             else:
                 _search_score_matrix = _score_matrix
