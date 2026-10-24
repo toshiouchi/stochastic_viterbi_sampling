@@ -903,36 +903,35 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
             # ★ リピートペナルティの動的適用
             # -----------------------------------------------------------------
  
-            if repeat_penalty > 0.0:
-                #  (B, i, K) -> (i, B, K, 1)
+             if repeat_penalty > 0.0:
                 past_tokens= beam_targets[:, :i].permute(1, 0, 2).unsqueeze(-1)
             
-                #  (1, B, K, 1)
-                last_token = past_tokens[-1:]
+                last_token = beam_targets[:, i-1].unsqueeze(0).unsqueeze(2)
                 
-                #  (1, B, 1, K)
-                to_tokens = beam_targets[:, i].unsqueeze(0).unsqueeze(2)
+                to_token = beam_targets[:, i].unsqueeze(0).unsqueeze(2)
+
+                is_permitted = torch.isin(to_token, permit_repeat)
                 
-                #  (1, B, 1, K)
-                is_permitted = torch.isin(to_tokens, permit_repeat)
+                # (i, B, K, K)
+                mask1 = (last_token == past_tokens).float()
                 
-                #  (i, B, K, 1)
-                mask1 = (last_token == past_tokens)
+                # ( i, B, K, K )
+                mask2 =  ( past_tokens == to_token )
+                # mask2 i, B, K, K
+                mask2 = ( mask2 & ~is_permitted ).float()
+
+                mask3 = [ torch.bmm( mask1[i2], mask2[i2] ) for i2 in range( i ) ]                     
+                mask3 = torch.stack( mask3, dim = 0 )
                 
-               # ( 1, B, K, K )
-                mask2 =  ( last_token == to_tokens )
-                mask2 = mask2 & ~is_permitted
+                penalty_factors = 1.0 - (mask3 * repeat_penalty)
                 
-                # (mask1.float() * mask2.float() * repeat_penalty)  (i, B, 1, K)
-                penalty_factors = 1.0 - (mask1.float() * mask2.float() * repeat_penalty)
-                
-                #  (B, K, K)
+                # (B, K, K)
                 total_penalty_matrix = torch.prod(penalty_factors, dim=0)
-                
+ 
                 _search_score_matrix = _score_matrix * total_penalty_matrix
             else:
                 _search_score_matrix = _score_matrix
-            
+           
             step_probs.append( _search_score_matrix / self.temp )
             
             # 通常のビタビ処理（ペナルティ適用後のスコア行列から MAX を取る）
