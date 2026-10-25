@@ -725,9 +725,6 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
                 penalty_factors = 1.0 - (repeat_mask * repeat_penalty) 
                 
                 total_penalty_matrix = torch.prod(penalty_factors, dim=0)
-                mask5 = total_penalty_matrix != 1.0
-                print( "count mask5:", mask5.float().sum() )
-                print( "total_penalty_matrix[mask5]:", total_penalty_matrix[mask5] )
 
                 _search_score_matrix = _score_matrix * total_penalty_matrix
 
@@ -893,7 +890,7 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
             # ★ リピートペナルティの動的適用
             # -----------------------------------------------------------------
  
-             if repeat_penalty > 0.0:
+            if repeat_penalty > 0.0:
                 past_tokens= beam_targets[:, :i].permute(1, 0, 2).unsqueeze(-1)
             
                 last_token = beam_targets[:, i-1].unsqueeze(0).unsqueeze(2)
