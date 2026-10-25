@@ -706,45 +706,33 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
             # -----------------------------------------------------------------
             # repeat penalty
             # -----------------------------------------------------------------
-            if repeat_penalty > 0.0:
-                from_tokens = [ beam_targets[:, i2][:, :, None] for i2 in range( i ) ]
-                from_tokens = torch.stack( from_tokens, dim = 0 )
-                
-                to_tokens = beam_targets[:, i][:, None, :]
+           if repeat_penalty > 0.0:
+                from_tokens = beam_targets[:, :i].permute( 1, 0, 2 ).unsqueeze( -2 )
+                to_tokens = beam_targets[:, i][:, None,:]
 
                 is_permitted = torch.isin(to_tokens, permit_repeat)
-                
-                repeat_mask1 = [] 
-                for i2 in range( i ):
-                    mask1 = ( from_tokens[i-1] == from_tokens[i2].permute(0,2,1) )
-                  
-                    repeat_mask1.append( mask1 )
-               
-                # repeat_mask1 shape i, B, beam, beam
-                
-                mask2 = ( from_tokens == to_tokens )
-                repeat_mask2 = mask2
-                # repeat_mask2 shape 1, B, beam, beam
-
+                repeat_mask1 = [ ( from_tokens[i-1].permute( 0, 2, 1 ) == from_tokens[i2]) for i2 in range( i ) ]
                 repeat_mask1 = torch.stack( repeat_mask1, dim = 0 )
- 
-                repeat_mask = []
-                for i2 in range( i ):
-                    tmp_mask = torch.bmm( repeat_mask1[i2].to(torch.float), repeat_mask2[0].to(torch.float) )
-                    repeat_mask.append( tmp_mask )
-                    
-                repeat_mask = torch.stack( repeat_mask, dim = 0 )
-                repeat_mask = repeat_mask * (~is_permitted).float()
                 
+                mask2 = [ ( from_tokens[i2].permute(0,2,1) == to_tokens ) for i2 in range( i ) ]
+                mask2 = torch.stack( mask2, dim = 0 )
+                repeat_mask2  = ( mask2 & (~is_permitted ) )
+                
+                repeat_mask = [ torch.bmm( repeat_mask1[i2].float(), repeat_mask2[i2].float() ) for i2 in range( i ) ]
+                
+                repeat_mask = torch.stack( repeat_mask, dim = 0 )
                 penalty_factors = 1.0 - (repeat_mask * repeat_penalty) 
                 
                 total_penalty_matrix = torch.prod(penalty_factors, dim=0)
+                mask5 = total_penalty_matrix != 1.0
+                print( "count mask5:", mask5.float().sum() )
+                print( "total_penalty_matrix[mask5]:", total_penalty_matrix[mask5] )
 
                 _search_score_matrix = _score_matrix * total_penalty_matrix
-                
+
             else:
                 _search_score_matrix = _score_matrix
-
+ 
             step_probs.append( _search_score_matrix / self.temp )
             
             # 通常のビタビ処理（ペナルティ適用後のスコア行列から MAX を取る）
