@@ -774,12 +774,13 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
 vocab_size = len( tokenizer )
 bsz = 4
 seq_len = 60
+repeat_penalty = 0.5 # [0,1]
 
 test = StochasticViterbiSampleRepeatPenalty( vocab_size )
 
 emissions = torch.randn( ( bsz, seq_len, vocab_size ) )
 
-finalized_tokens = test._computer_viterbi_algorithm_repeat_penalty( emissions )
+finalized_tokens = test._computer_viterbi_algorithm_repeat_penalty( emissions, repeat_penalty = repeat_penalty  )
 
 print( finalized_tokens.size() )
 ```
