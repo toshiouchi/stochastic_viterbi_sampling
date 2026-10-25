@@ -640,6 +640,7 @@ from_token_id = tokenizer.encode( "from" )[1]
 with_token_id = tokenizer.encode( "with" )[1]
 by_token_id = tokenizer.encode( "by" )[1]
 we_token_id = tokenizer.encode( "we" )[1]
+you_token_id = tokenizer.encode( "you" )[1]
 i_token_id = tokenizer.encode( "i" )[1]
 he_token_id = tokenizer.encode( "he" )[1]
 she_token_id = tokenizer.encode( "she" )[1]
@@ -673,7 +674,7 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
         device = emissions.device
 
         permit_repeat = [ pad_token_id, eos_token_id, cls_token_id, sep_token_id, a_token_id, an_token_id, the_token_id, period_token_id, \
-                         comma_token_id, and_token_id, in_token_id, we_token_id, i_token_id, he_token_id, she_token_id, \
+                         comma_token_id, and_token_id, in_token_id, we_token_id, you_token_id, i_token_id, he_token_id, she_token_id, \
                          it_token_id, they_token_id, dbl_token_id, sgl_token_id ]
         permit_repeat = torch.tensor( permit_repeat ).to(device)
         
@@ -824,6 +825,7 @@ from_token_id = tokenizer.encode( "from" )[1]
 with_token_id = tokenizer.encode( "with" )[1]
 by_token_id = tokenizer.encode( "by" )[1]
 we_token_id = tokenizer.encode( "we" )[1]
+you_token_id = tokenizer.encode( "you" )[1]
 i_token_id = tokenizer.encode( "i" )[1]
 he_token_id = tokenizer.encode( "he" )[1]
 she_token_id = tokenizer.encode( "she" )[1]
@@ -857,7 +859,7 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
         device = emissions.device
 
         permit_repeat = [ pad_token_id, eos_token_id, cls_token_id, sep_token_id, a_token_id, an_token_id, the_token_id, period_token_id, \
-                         comma_token_id, and_token_id, in_token_id, we_token_id, i_token_id, he_token_id, she_token_id, \
+                         comma_token_id, and_token_id, in_token_id, we_token_id, you_token_id, i_token_id, he_token_id, she_token_id, \
                          it_token_id, they_token_id, dbl_token_id, sgl_token_id ]
         permit_repeat = torch.tensor( permit_repeat ).to(device)
         
