@@ -707,7 +707,7 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
             # -----------------------------------------------------------------
             # repeat penalty
             # -----------------------------------------------------------------
-           if repeat_penalty > 0.0:
+            if repeat_penalty > 0.0:
                 from_tokens = beam_targets[:, :i].permute( 1, 0, 2 ).unsqueeze( -2 )
                 to_tokens = beam_targets[:, i][:, None,:]
 
