@@ -664,7 +664,7 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
         self.beam = beam_size
         self.temp = temp
 
-    def _computer_viterbi_algorithm_repeat_penalty(self, emissions, top_indices=None, masks=None, repeat_penalty=0.8, beam=None):
+    def _computer_viterbi_algorithm_repeat_penalty(self, emissions, top_indices=None, masks=None, repeat_penalty=0.0001, beam=None):
         beam = beam if beam is not None else self.beam
         batch_size, seq_len = emissions.size()[:2]
         B = batch_size
@@ -767,21 +767,98 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
 ```
 
 ```python
+def calc_ngram_repeat_fast(preds):
+    # preds が書き換わらないよう、この関数内では元の値を保護する
+
+    repeat_thresh = ( 1,1,1,1)
+    repeat_weight = ( 1,1,1,1 )
+    bsz, seq_len = preds.size()
+    ngram_cnt = torch.zeros(bsz, device=preds.device, dtype=torch.float)
+    
+    base_ignore = [pad_token_id, eos_token_id, cls_token_id, sep_token_id]
+    extra_ignore = [a_token_id, an_token_id, the_token_id, period_token_id, comma_token_id, and_token_id, \
+                   we_token_id, i_token_id, you_token_id, he_token_id, she_token_id, it_token_id, they_token_id, \
+                   dbl_token_id, sgl_token_id, in_token_id, of_token_id, on_token_id, at_token_id, to_token_id, \
+                   for_token_id, from_token_id, with_token_id, by_token_id]
+    ng = 1        
+    
+    for n in range(1, ng + 1 ):
+    #for n in range(2, ng + 1 ):
+        if seq_len < n:
+            continue
+
+        current_ignore_ids = base_ignore + (extra_ignore if n == 1 else [])
+        # ignore_mask は bool なので preds に影響しません
+        ignore_mask = torch.isin(preds, torch.tensor(current_ignore_ids, device=preds.device))
+        
+        # 【重要】unfoldの後に .clone() を入れてメモリを切り離す
+        ngrams = preds.unfold(dimension=1, size=n, step=1).clone()
+        num_ngrams = ngrams.size(1)
+        
+        ngram_ignore_mask = ignore_mask.unfold(dimension=1, size=n, step=1).any(dim=-1)
+        
+        if n > 1:
+            # 語彙サイズに基づくハッシュ化
+            vocab_size_max = max(preds.max().item(), 100000)
+            weights = torch.pow(torch.tensor([vocab_size_max], device=preds.device), 
+                                torch.arange(n, device=preds.device)).long()
+            hashed_ngrams = (ngrams.long() * weights).sum(dim=-1)
+        else:
+            hashed_ngrams = ngrams.squeeze(-1).long()
+
+        # これで hashed_ngrams を書き換えても、clone 済みのデータなので preds は安全
+        invalid_val = -1
+        hashed_ngrams[ngram_ignore_mask] = invalid_val
+
+        for b in range(bsz):
+            b_ngrams = hashed_ngrams[b]
+            valid_b_ngrams = b_ngrams[b_ngrams != invalid_val]
+            
+            if valid_b_ngrams.numel() == 0:
+                continue
+                
+            unique_vals, counts = torch.unique(valid_b_ngrams, return_counts=True)
+            
+            #mask = counts > self.repeat_thresh[n-1] 
+            mask = counts > repeat_thresh[n-1]
+            if mask.any():
+                # 超過した数だけを純粋に加算する
+                # 例: thresh=2 で 3回出たら、3 - 2 = 1回分のリピート
+                # 例: thresh=1 で 2回出たら、2 - 1 = 1回分のリピート
+                #repeat_counts = counts[mask] - self.repeat_thresh[n-1]
+                #ngram_cnt[b] += repeat_counts.sum().float() * self.repeat_weight[n-1]
+                repeat_counts = counts[mask] - repeat_thresh[n-1]
+                ngram_cnt[b] += repeat_counts.sum().float() * repeat_weight[n-1]
+    
+    #penalty = - (ngram_cnt / seq_len).clamp(max=1.0)
+    #penalty = - torch.pow(ngram_cnt, 2.0) 
+    count = ngram_cnt
+    
+    #return penalty[:, None]
+    return count
+```
+
+```python
 vocab_size = len( tokenizer )
 bsz = 4
 seq_len = 60
-repeat_penalty = 0.001
 
 test = StochasticViterbiSampleRepeatPenalty( vocab_size )
 
 #emissions = torch.randn( ( bsz, seq_len, vocab_size ) )
 emissions = torch.ones( ( bsz, seq_len, vocab_size ) ) / 2
 
-finalized_tokens = test._computer_viterbi_algorithm_repeat_penalty( emissions, repeat_penalty =0.001 )
+finalized_tokens = test._computer_viterbi_algorithm_repeat_penalty( emissions, repeat_penalty =0.0001 )
 
 print( finalized_tokens.size() )
+
+repeat_count = calc_ngram_repeat_fast( finalized_tokens  )
+
+print( repeat_count )
+
 ```
 
 ```python
 torch.Size([4, 60])
+tensor([0., 0., 0., 0.])
 ```
