@@ -655,9 +655,6 @@ vocab_size = len( tokenizer )
 
 print( "vocab_size:", vocab_size )
 
-
-
-
 class StochasticViterbiSampleRepeatPenalty(nn.Module):
     def __init__(self, num_embedding, low_rank=32, beam_size=256, temp=1.0):
         super().__init__()
@@ -672,10 +669,9 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
         batch_size, seq_len = emissions.size()[:2]
         B = batch_size
         device = emissions.device
-
         permit_repeat = [
             pad_token_id, eos_token_id, cls_token_id, sep_token_id, a_token_id, an_token_id, the_token_id, period_token_id,
-            comma_token_id, and_token_id, in_token_id, we_token_id, i_token_id, he_token_id, she_token_id,
+            comma_token_id, and_token_id, in_token_id, we_token_id, you_token_id, i_token_id, he_token_id, she_token_id,
             it_token_id, they_token_id, dbl_token_id, sgl_token_id
         ]
         permit_repeat = torch.tensor(permit_repeat, device=device)
@@ -689,7 +685,7 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
         beam_transition_score1 = self.E1(beam_targets[:, :-1]) # B x (T-1) x K x D
         beam_transition_score2 = self.E2(beam_targets[:, 1:])  # B x (T-1) x K x D
         beam_transition_matrix = torch.bmm(
-            beam_transition_score1.view(-1, beam, self.rank), 
+            beam_transition_score1.view(-1, beam, self.rank),
             beam_transition_score2.view(-1, beam, self.rank).transpose(1, 2)
         )
         beam_transition_matrix = beam_transition_matrix.view(batch_size, -1, beam, beam) # B, seq_len-1, beam, beam
@@ -700,11 +696,11 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
 
         score = beam_emission_scores[:, 0] # B x K
         dummy = torch.arange(beam, device=score.device).expand(*score.size()).contiguous()
-        
+
         beam_history = beam_targets[:, 0].unsqueeze(-1) # [B, beam, 1]
 
         for i in range(1, seq_len):
-            # _score_matrix shape: [B, beam_from, beam_to]
+            # _score_matrix 形状: [B, beam_from, beam_to]
             _score_matrix = score.unsqueeze(-1) + beam_transition_matrix[:, i-1, :, :]
             _score_matrix = _score_matrix + beam_emission_scores[:, i].unsqueeze(1)
 
@@ -726,10 +722,10 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
                 # repeat_mask shape: [B, beam_from, beam_to]
                 repeat_mask = match_matrix.any(dim=2) & (~is_permitted)
 
-                penalty_matrix = torch.ones_like(_score_matrix)
-                penalty_matrix[repeat_mask] = 1.0 - repeat_penalty
-
-                _search_score_matrix = _score_matrix * penalty_matrix
+                penalty_matrix = repeat_mask.float()
+                log_penalty = torch.log( torch.tensor( repeat_penalty))
+                penalty_delta = torch.where( penalty_matrix == 1.0, log_penalty,0.0)
+                _search_score_matrix = _score_matrix + penalty_delta
             else:
                 _search_score_matrix = _score_matrix
 
@@ -743,10 +739,10 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
                 index = torch.where(masks[:, i: i+1], _index, dummy)
             else:
                 score, index = _score, _index
-            
+
             traj_tokens.append(index)
 
-            
+
             history_len = beam_history.size(-1)
             gather_index = index.unsqueeze(-1).expand(-1, -1, history_len)
             updated_history = torch.gather(beam_history, 1, gather_index)
@@ -774,13 +770,14 @@ class StochasticViterbiSampleRepeatPenalty(nn.Module):
 vocab_size = len( tokenizer )
 bsz = 4
 seq_len = 60
-repeat_penalty = 0.5 # [0,1]
+repeat_penalty = 0.001
 
 test = StochasticViterbiSampleRepeatPenalty( vocab_size )
 
-emissions = torch.randn( ( bsz, seq_len, vocab_size ) )
+#emissions = torch.randn( ( bsz, seq_len, vocab_size ) )
+emissions = torch.ones( ( bsz, seq_len, vocab_size ) ) / 2
 
-finalized_tokens = test._computer_viterbi_algorithm_repeat_penalty( emissions, repeat_penalty = repeat_penalty  )
+finalized_tokens = test._computer_viterbi_algorithm_repeat_penalty( emissions, repeat_penalty =0.001 )
 
 print( finalized_tokens.size() )
 ```
